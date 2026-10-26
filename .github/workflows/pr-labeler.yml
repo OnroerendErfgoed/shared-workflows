@@ -1,0 +1,32 @@
+name: PR labeler
+
+# Reusable workflow: labels a pull request based on its branch name, using the
+# configuration file in the calling repository (by default .github/pr-labeler.yml):
+#
+#   feature: ['feature/*', 'feat/*']
+#   fix: ['bugfix/*', 'fix/*']
+#   test: test/*
+#
+# The calling job must grant `contents: read` and `pull-requests: write`.
+
+on:
+  workflow_call:
+    inputs:
+      configuration-path:
+        description: Path to the labeler configuration in the calling repository.
+        type: string
+        default: .github/pr-labeler.yml
+
+permissions: {}
+
+jobs:
+  pr-labeler:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # to read the configuration file
+      pull-requests: write # to add labels to the PR
+    steps:
+      - uses: TimonVS/pr-labeler-action@f9c084306ce8b3f488a8f3ee1ccedc6da131d1af # v5.0.0
+        with:
+          repo-token: ${{ github.token }}
+          configuration-path: ${{ inputs.configuration-path }}

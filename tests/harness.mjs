@@ -1,0 +1,109 @@
+// Runs the inline actions/github-script code of a workflow step against a temporary
+// git repository and a mocked GitHub API, so the scripts can be tested without GitHub.
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(import.meta.url);
+const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+
+// Returns the `script: |` block of the step with the given id, dedented.
+export function extractScript(workflow, stepId) {
+  const lines = fs.readFileSync(path.join(root, '.github/workflows', workflow), 'utf8').split('\n');
+  const idLine = lines.findIndex((l) => l.trim() === `id: ${stepId}`);
+  if (idLine < 0) throw new Error(`No step with id ${stepId} in ${workflow}`);
+  const scriptLine = lines.findIndex((l, i) => i > idLine && l.trim() === 'script: |');
+  const keyIndent = lines[scriptLine].search(/\S/);
+  const body = [];
+  for (const line of lines.slice(scriptLine + 1)) {
+    if (line.trim() && line.search(/\S/) <= keyIndent) break;
+    body.push(line);
+  }
+  const indent = Math.min(...body.filter((l) => l.trim()).map((l) => l.search(/\S/)));
+  return body.map((l) => l.slice(indent)).join('\n');
+}
+
+// Creates a git repository with the given files ({ 'path/name': 'content' }).
+export function makeRepo(files) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shared-workflows-test-'));
+  for (const [file, content] of Object.entries(files)) {
+    fs.mkdirSync(path.join(dir, path.dirname(file)), { recursive: true });
+    fs.writeFileSync(path.join(dir, file), content);
+  }
+  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['add', '-A'], { cwd: dir });
+  return dir;
+}
+
+export const read = (dir, file) => fs.readFileSync(path.join(dir, file), 'utf8');
+
+// Minimal GitHub API mock. Paginated endpoints return arrays, direct calls return { data }.
+export function mockGithub({ milestones = [], milestoneIssues = [], mergedPrs = [], issues = {}, releases = [] } = {}) {
+  const calls = { createRelease: [], updateRelease: [] };
+  const github = {
+    calls,
+    paginate: async (fn, params) => fn(params),
+    graphql: async () => ({
+      repository: { pullRequest: { commits: {
+        pageInfo: { hasNextPage: false, endCursor: null },
+        nodes: [{ commit: { associatedPullRequests: { nodes: mergedPrs } } }],
+      } } },
+    }),
+    rest: {
+      issues: {
+        listMilestones: async () => milestones,
+        listForRepo: async () => milestoneIssues,
+        get: async ({ issue_number }) => {
+          if (!issues[issue_number]) throw Object.assign(new Error('Not Found'), { status: 404 });
+          return { data: issues[issue_number] };
+        },
+      },
+      repos: {
+        listReleases: async () => releases,
+        createRelease: async (release) => {
+          calls.createRelease.push(release);
+          return { data: { ...release, html_url: `https://github.com/o/r/releases/tag/${release.tag_name}` } };
+        },
+        updateRelease: async (release) => {
+          calls.updateRelease.push(release);
+          return { data: { ...release, html_url: `https://github.com/o/r/releases/tag/${release.tag_name}` } };
+        },
+      },
+    },
+  };
+  return github;
+}
+
+// Runs a script in `dir` with the given pull request payload and step env.
+export async function runScript(script, { dir, github, pullRequest, env = {} }) {
+  const outputs = {};
+  const failures = [];
+  const summary = { addHeading: () => summary, addLink: () => summary, addCodeBlock: () => summary, write: async () => {} };
+  const core = {
+    setOutput: (name, value) => { outputs[name] = value; },
+    setFailed: (message) => { failures.push(message); },
+    info: () => {},
+    warning: () => {},
+    summary,
+  };
+  const exec = {
+    getExecOutput: async (cmd, args) => ({ stdout: execFileSync(cmd, args, { cwd: dir, encoding: 'utf8' }) }),
+  };
+  const context = { repo: { owner: 'OnroerendErfgoed', repo: 'demo' }, payload: { pull_request: pullRequest } };
+
+  const previousCwd = process.cwd();
+  const previousEnv = { ...process.env };
+  process.chdir(dir);
+  Object.assign(process.env, { RUNNER_TEMP: dir, CHANGELOG_PATH: '', TAG_PREFIX: '', PRERELEASE: 'false' }, env);
+  try {
+    await new AsyncFunction('require', 'github', 'context', 'core', 'exec', script)(require, github, context, core, exec);
+  } finally {
+    process.chdir(previousCwd);
+    process.env = previousEnv;
+  }
+  return { outputs, failures };
+}

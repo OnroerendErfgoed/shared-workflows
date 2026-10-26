@@ -1,0 +1,40 @@
+# Caller for the shared Python tests. Copy to .github/workflows/ in a project repo.
+# Keep the triggers and paths filters the repo had before.
+name: Backend tests
+
+on:
+  pull_request:
+    paths:
+      - backend/**
+      - alembic/**
+      - pyproject.toml
+      - uv.lock
+      - requirements*.txt
+      - .github/workflows/ci.yml
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  test:
+    uses: OnroerendErfgoed/shared-workflows/.github/workflows/python-tests.yml@v1
+    permissions:
+      contents: read
+      pull-requests: write # coverage comment
+    with:
+      # App backend on a self-hosted runner, with services:
+      python-versions: '["3.11"]'
+      installer: uv # or pip-sync (default) / pip
+      postgres: true
+      postgres-db: myapp_test
+      redis: true
+      elasticsearch-version: "9.2.1"
+      db-setup-command: scripts/reset_db_test.sh "$PG_CONTAINER"
+      test-command: pytest backend/tests --cov=myapp --cov-report=xml:"$COVERAGE_FILE"
+
+      # Library on GitHub-hosted runners instead (required for public repos):
+      # runs-on: ubuntu-latest
+      # python-versions: '["3.11", "3.12", "3.13"]'
+      # requirements-file: requirements-dev.txt
+      # lint-command: ""

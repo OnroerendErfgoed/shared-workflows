@@ -1,0 +1,246 @@
+name: Python tests
+
+# Reusable workflow: installs a Python project, starts the services it needs,
+# runs the linter and the tests, and reports coverage on pull requests.
+#
+# Triggers (and their `paths:` filters) stay in the calling workflow.
+# The calling job must grant `contents: read` and `pull-requests: write`.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label, or a JSON list of labels (e.g. '["self-hosted", "linux"]').
+        type: string
+        default: self-hosted
+      python-versions:
+        description: JSON list of Python versions; one job runs per version.
+        type: string
+        default: '["3.11"]'
+      allow-prereleases:
+        description: Allow pre-release Python versions (e.g. a 3.15 beta).
+        type: boolean
+        default: false
+      working-directory:
+        description: Directory the install, lint and test commands run in.
+        type: string
+        default: .
+      installer:
+        description: "How to install the project: pip-sync, pip or uv."
+        type: string
+        default: pip-sync
+      requirements-file:
+        description: Requirements file for pip-sync and pip. Ignored by uv.
+        type: string
+        default: requirements-ci.txt
+      install-command:
+        description: Custom install command. Replaces the default install of the chosen installer; pip-sync and pip still get a virtualenv.
+        type: string
+        default: ""
+      skip-build-hooks:
+        description: Set HATCH_BUILD_NO_HOOKS=true during the install (skips frontend builds in hatch hooks).
+        type: boolean
+        default: true
+      lint-command:
+        description: Lint command. Empty to skip.
+        type: string
+        default: flake8
+      test-command:
+        description: Test command. $COVERAGE_FILE holds the absolute path the coverage report must be written to.
+        type: string
+        required: true
+      db-setup-command:
+        description: Command that prepares the test database. $PG_CONTAINER holds the id of the postgres service container.
+        type: string
+        default: ""
+      postgres:
+        description: Start a PostGIS service on port 5432.
+        type: boolean
+        default: false
+      postgres-image:
+        description: Image for the postgres service.
+        type: string
+        default: postgis/postgis:13-3.3-alpine
+      postgres-db:
+        description: POSTGRES_DB for the postgres service.
+        type: string
+        default: ""
+      redis:
+        description: Start a Redis service on port 6379.
+        type: boolean
+        default: false
+      elasticsearch-version:
+        description: Start Elasticsearch with this version on port 9200 (e.g. 9.2.1). Empty for no Elasticsearch.
+        type: string
+        default: ""
+      elasticsearch-java-opts:
+        description: ES_JAVA_OPTS for Elasticsearch. Falls back to the ES_JAVA_OPTS variable, then to a 128 MB heap.
+        type: string
+        default: ""
+      coverage:
+        description: "Coverage reporting: orgoro (PR comment with thresholds), coveralls or none."
+        type: string
+        default: orgoro
+      coverage-file:
+        description: Coverage XML report, relative to the working directory.
+        type: string
+        default: coverage.xml
+      coverage-source-dir:
+        description: sourceDir for orgoro/coverage, when the report paths are not relative to the repository root.
+        type: string
+        default: ""
+      coverage-threshold-all:
+        type: number
+        default: 0.8
+      coverage-threshold-new:
+        type: number
+        default: 0.9
+      coverage-threshold-modified:
+        type: number
+        default: 0.8
+      timeout-minutes:
+        type: number
+        default: 15
+
+permissions: {}
+
+jobs:
+  test:
+    name: test (${{ matrix.python-version }})
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      pull-requests: write # coverage comment
+    strategy:
+      matrix:
+        python-version: ${{ fromJSON(inputs.python-versions) }}
+
+    # A service with an empty image is not started.
+    services:
+      redis:
+        image: ${{ inputs.redis && 'redis' || '' }}
+        ports:
+          - 6379:6379
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
+      postgres:
+        image: ${{ inputs.postgres && inputs.postgres-image || '' }}
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_DB: ${{ inputs.postgres-db }}
+          POSTGRES_PASSWORD: password
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: --health-cmd "pg_isready -U postgres" --health-interval 10s --health-timeout 5s --health-retries 5
+      elasticsearch:
+        image: ${{ inputs.elasticsearch-version && format('docker.elastic.co/elasticsearch/elasticsearch:{0}', inputs.elasticsearch-version) || '' }}
+        ports:
+          - 9200:9200
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          ES_JAVA_OPTS: ${{ inputs.elasticsearch-java-opts || vars.ES_JAVA_OPTS || '-Xms128m -Xmx128m' }}
+          ES_HEAP_SIZE: 128m
+          MAX_LOCKED_MEMORY: 100000
+        options: --health-cmd "curl -f http://localhost:9200" --health-interval 30s --health-timeout 10s --health-retries 5
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+
+    env:
+      PYTHON_VERSION: ${{ matrix.python-version }}
+      COVERAGE_FILE: ${{ github.workspace }}/${{ inputs.working-directory }}/${{ inputs.coverage-file }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Configure sysctl limits for Elasticsearch
+        if: inputs.elasticsearch-version != ''
+        run: |
+          sudo swapoff -a
+          sudo sysctl vm.swappiness=1
+          sudo sysctl fs.file-max=262144
+          sudo sysctl vm.max_map_count=262144
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: inputs.installer != 'uv'
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: ${{ inputs.allow-prereleases }}
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        if: inputs.installer == 'uv'
+
+      - name: Install
+        env:
+          INSTALLER: ${{ inputs.installer }}
+          REQUIREMENTS_FILE: ${{ inputs.requirements-file }}
+          INSTALL_COMMAND: ${{ inputs.install-command }}
+          HATCH_BUILD_NO_HOOKS: ${{ inputs.skip-build-hooks && 'true' || '' }}
+          VENV: ${{ runner.temp }}/venv
+        run: |
+          case "$INSTALLER" in
+            uv)
+              if [ -n "$INSTALL_COMMAND" ]; then eval "$INSTALL_COMMAND"; else uv sync --locked -p "$PYTHON_VERSION"; fi
+              VENV="$PWD/.venv"
+              ;;
+            pip-sync|pip)
+              python -m venv "$VENV"
+              source "$VENV/bin/activate"
+              if [ -n "$INSTALL_COMMAND" ]; then
+                eval "$INSTALL_COMMAND"
+              elif [ "$INSTALLER" = pip-sync ]; then
+                pip install pip-tools
+                pip-sync "$REQUIREMENTS_FILE"
+                pip install -e .
+              else
+                pip install -r "$REQUIREMENTS_FILE"
+                pip install -e .
+              fi
+              ;;
+            *)
+              echo "::error::Unknown installer '$INSTALLER' (expected pip-sync, pip or uv)"
+              exit 1
+              ;;
+          esac
+          # Later steps use the virtualenv without activating it.
+          echo "VIRTUAL_ENV=$VENV" >> "$GITHUB_ENV"
+          echo "$VENV/bin" >> "$GITHUB_PATH"
+
+      - name: Set up test database
+        if: inputs.db-setup-command != ''
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+          DB_SETUP_COMMAND: ${{ inputs.db-setup-command }}
+        run: eval "$DB_SETUP_COMMAND"
+
+      - name: Lint
+        if: inputs.lint-command != ''
+        env:
+          LINT_COMMAND: ${{ inputs.lint-command }}
+        run: eval "$LINT_COMMAND"
+
+      - name: Test
+        env:
+          TEST_COMMAND: ${{ inputs.test-command }}
+        run: eval "$TEST_COMMAND"
+
+      # orgoro/coverage only acts on pull_request events.
+      - name: Coverage report
+        if: inputs.coverage == 'orgoro' && github.event_name == 'pull_request'
+        uses: orgoro/coverage@ca0c362dc1a4f100447309405e6dfea47e251495 # v3.3.1
+        with:
+          coverageFile: ${{ env.COVERAGE_FILE }}
+          token: ${{ github.token }}
+          sourceDir: ${{ inputs.coverage-source-dir }}
+          thresholdAll: ${{ inputs.coverage-threshold-all }}
+          thresholdNew: ${{ inputs.coverage-threshold-new }}
+          thresholdModified: ${{ inputs.coverage-threshold-modified }}
+
+      - name: Coveralls
+        if: inputs.coverage == 'coveralls'
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
