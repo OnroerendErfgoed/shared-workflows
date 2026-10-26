@@ -19,7 +19,7 @@ jobs:
       contents: read
       pull-requests: write
     with:
-      test-command: pytest tests --cov=myapp --cov-report=xml:"$COVERAGE_FILE"
+      test-command: pytest tests --cov=myapp --cov-report=xml:"$COVERAGE_XML"
 ```
 
 Triggers, branch and `paths:` filters always stay in the caller. A called workflow can only use the `GITHUB_TOKEN` permissions the calling job grants, so every caller job sets the `permissions:` listed below.
@@ -30,7 +30,7 @@ One job per Python version in `python-versions`. Commands run in `working-direct
 
 | Input | Type | Default | Description |
 | --- | --- | --- | --- |
-| `test-command` | string | **required** | Test command. Write the coverage XML to `$COVERAGE_FILE`. |
+| `test-command` | string | **required** | Test command. Write the coverage XML to `$COVERAGE_XML`. |
 | `runs-on` | string | `self-hosted` | Runner label, or a JSON list of labels. Public repos must use `ubuntu-latest`. |
 | `python-versions` | string | `["3.11"]` | JSON list of Python versions. |
 | `allow-prereleases` | boolean | `false` | Allow pre-release Python versions. |
@@ -45,10 +45,11 @@ One job per Python version in `python-versions`. Commands run in `working-direct
 | `postgres-image` | string | `postgis/postgis:13-3.3-alpine` | |
 | `postgres-db` | string | `""` | `POSTGRES_DB`. |
 | `redis` | boolean | `false` | Start Redis on port 6379. |
+| `redis-image` | string | `redis` | |
 | `elasticsearch-version` | string | `""` | Start Elasticsearch (single node, no security) on port 9200, e.g. `9.2.1`. Also sets the sysctl limits it needs. |
 | `elasticsearch-java-opts` | string | `""` | `ES_JAVA_OPTS`. Falls back to the `ES_JAVA_OPTS` Actions variable (org or repo), then to `-Xms128m -Xmx128m`. |
 | `coverage` | string | `orgoro` | `orgoro` (PR comment with thresholds, PRs only), `coveralls` or `none`. |
-| `coverage-file` | string | `coverage.xml` | Coverage XML, relative to `working-directory`. Its absolute path is in `$COVERAGE_FILE`. |
+| `coverage-file` | string | `coverage.xml` | Coverage XML, relative to `working-directory`. Its absolute path is in `$COVERAGE_XML`. |
 | `coverage-source-dir` | string | `""` | `sourceDir` for orgoro/coverage. |
 | `coverage-threshold-all` / `-new` / `-modified` | number | `0.8` / `0.9` / `0.8` | orgoro/coverage thresholds. |
 | `timeout-minutes` | number | `15` | Per job. |

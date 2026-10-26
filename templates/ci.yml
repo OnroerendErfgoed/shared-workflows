@@ -31,7 +31,7 @@ jobs:
       redis: true
       elasticsearch-version: "9.2.1"
       db-setup-command: scripts/reset_db_test.sh "$PG_CONTAINER"
-      test-command: pytest backend/tests --cov=myapp --cov-report=xml:"$COVERAGE_FILE"
+      test-command: pytest backend/tests --cov=myapp --cov-report=xml:"$COVERAGE_XML"
 
       # Library on GitHub-hosted runners instead (required for public repos):
       # runs-on: ubuntu-latest

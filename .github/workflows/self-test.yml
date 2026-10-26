@@ -67,7 +67,7 @@ jobs:
       runs-on: ubuntu-latest
       python-versions: '["3.11", "3.12", "3.13"]'
       working-directory: tests/fixtures/python-app
-      test-command: pytest --cov=demo_app --cov-report=xml:"$COVERAGE_FILE" tests
+      test-command: pytest --cov=demo_app --cov-report=xml:"$COVERAGE_XML" tests
       coverage-source-dir: tests/fixtures/python-app
 
   python-pip:
