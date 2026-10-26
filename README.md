@@ -133,8 +133,25 @@ Every release gets an entry in [CHANGELOG.md](CHANGELOG.md).
 
 All third-party actions are pinned to a commit SHA with the version in a comment; Dependabot proposes updates.
 
-The inline `github-script` code of the changelog and release workflows is tested by extracting it from the workflow files and running it against a temporary git repository with a mocked GitHub API (Node 20+, no dependencies):
+[`self-test.yml`](.github/workflows/self-test.yml) runs on every pull request and push to `main`:
+
+| Job | Checks |
+| --- | --- |
+| `lint` | [actionlint](https://github.com/rhysd/actionlint) (with shellcheck) and [zizmor](https://docs.zizmor.sh/) on `.github/workflows/` and `templates/` |
+| `scripts` | The inline `github-script` code of the changelog and release workflows, extracted from the workflow files and run against a temporary git repository with a mocked GitHub API |
+| `python-pip-sync`, `python-pip`, `python-uv` | `python-tests.yml` with each installer against [`tests/fixtures/python-app`](tests/fixtures/python-app), a minimal Pyramid app |
+| `python-services` | `python-tests.yml` with PostGIS, Redis and Elasticsearch, a DB setup command, and tests that check each service |
+
+Run the script tests locally (Node 22+, no dependencies):
 
 ```bash
 node --test 'tests/*.test.mjs'
+```
+
+The fixture app's dependencies are pinned in `requirements-ci.txt` (for pip-sync and pip) and `uv.lock`, both resolved with releases at least two weeks old:
+
+```bash
+cd tests/fixtures/python-app
+uv pip compile requirements-ci.in --universal --python-version 3.11 --exclude-newer <date> -o requirements-ci.txt
+uv lock  # uses exclude-newer from pyproject.toml
 ```

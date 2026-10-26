@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "demo-app"
+version = "0.1.0"
+description = "Minimal Pyramid app used by the self-test of the shared workflows."
+requires-python = ">=3.11"
+dependencies = ["pyramid"]
+
+[dependency-groups]
+dev = ["flake8", "pytest", "pytest-cov"]
+
+[tool.uv]
+# Only resolve releases that are at least two weeks old (also used for requirements-ci.txt).
+exclude-newer = "2026-10-12T00:00:00Z"

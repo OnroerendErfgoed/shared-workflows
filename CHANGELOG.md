@@ -9,3 +9,5 @@ First version of the shared workflows.
 - `changelog-draft.yml` and `release-draft.yml` only run for PRs from `develop` (`source-branch` input) and have separate caller templates.
 - `release-draft.yml`: based on `draft-release.yml`. Same changelog lookup, category headings in the release notes, `tag-prefix` and `prerelease` inputs, outputs `version`, `tag_name` and `html_url`.
 - `pr-labeler.yml`: the PR labeler used in 51 repos.
+- `changelog-draft.yml`: fetch at most 10 labels per linked issue, to stay under GitHub's GraphQL node limit (the query was rejected with 20).
+- `self-test.yml`: actionlint, zizmor, script tests, and `python-tests.yml` against a fixture app with every installer and all services.
