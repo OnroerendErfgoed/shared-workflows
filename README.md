@@ -130,6 +130,27 @@ Callers use the major tag `@v1`, which always points to the latest `v1.x.y` rele
 
 Every release gets an entry in [CHANGELOG.md](CHANGELOG.md).
 
+### Releasing
+
+1. In a PR, move the changes in `CHANGELOG.md` under a `## x.y.z (YYYY-MM-DD)` heading, and merge it.
+2. Tag the merge commit on `main` and create the release with the changelog entry as notes:
+
+   ```bash
+   git switch main && git pull
+   git tag -a vX.Y.Z -m "vX.Y.Z"
+   git push origin vX.Y.Z
+   gh release create vX.Y.Z --verify-tag --title vX.Y.Z --notes "..."
+   ```
+
+3. Point the major tag at the new release, so callers on `@v1` get it:
+
+   ```bash
+   git tag -f -a v1 -m "v1 -> vX.Y.Z" vX.Y.Z^{}
+   git push -f origin v1
+   ```
+
+   For a new major version, create `v2` the same way, without `-f`.
+
 ## Development
 
 All third-party actions are pinned to a commit SHA with the version in a comment; Dependabot proposes updates.
