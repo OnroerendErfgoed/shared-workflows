@@ -1,0 +1,4 @@
+pyramid
+flake8
+pytest
+pytest-cov

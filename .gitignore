@@ -1,3 +1,9 @@
 # Working notes for the migration; not part of the published repo.
 PLAN-shared-workflows.md
 inventory.md
+
+# Local runs of the test fixtures
+.venv/
+__pycache__/
+.coverage
+coverage.xml

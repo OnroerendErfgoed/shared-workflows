@@ -1,0 +1,6 @@
+paths:
+  .github/workflows/**/*.yml:
+    ignore:
+      # actionlint v1.7.12 predates GitHub's self-repository syntax (uses: $/...), added July 2026.
+      # Remove once actionlint supports it.
+      - 'reusable workflow call "\$/'

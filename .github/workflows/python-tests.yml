@@ -46,7 +46,7 @@ on:
         type: string
         default: flake8
       test-command:
-        description: Test command. $COVERAGE_FILE holds the absolute path the coverage report must be written to.
+        description: Test command. $COVERAGE_XML holds the absolute path the coverage report must be written to.
         type: string
         required: true
       db-setup-command:
@@ -69,6 +69,10 @@ on:
         description: Start a Redis service on port 6379.
         type: boolean
         default: false
+      redis-image:
+        description: Image for the redis service.
+        type: string
+        default: redis
       elasticsearch-version:
         description: Start Elasticsearch with this version on port 9200 (e.g. 9.2.1). Empty for no Elasticsearch.
         type: string
@@ -117,14 +121,15 @@ jobs:
         python-version: ${{ fromJSON(inputs.python-versions) }}
 
     # A service with an empty image is not started.
+    # The images are chosen by the caller (tag, or tag@sha256:digest), so they are not pinned here.
     services:
       redis:
-        image: ${{ inputs.redis && 'redis' || '' }}
+        image: ${{ inputs.redis && inputs.redis-image || '' }} # zizmor: ignore[unpinned-images]
         ports:
           - 6379:6379
         options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
       postgres:
-        image: ${{ inputs.postgres && inputs.postgres-image || '' }}
+        image: ${{ inputs.postgres && inputs.postgres-image || '' }} # zizmor: ignore[unpinned-images]
         ports:
           - 5432:5432
         env:
@@ -133,7 +138,7 @@ jobs:
           POSTGRES_HOST_AUTH_METHOD: trust
         options: --health-cmd "pg_isready -U postgres" --health-interval 10s --health-timeout 5s --health-retries 5
       elasticsearch:
-        image: ${{ inputs.elasticsearch-version && format('docker.elastic.co/elasticsearch/elasticsearch:{0}', inputs.elasticsearch-version) || '' }}
+        image: ${{ inputs.elasticsearch-version && format('docker.elastic.co/elasticsearch/elasticsearch:{0}', inputs.elasticsearch-version) || '' }} # zizmor: ignore[unpinned-images]
         ports:
           - 9200:9200
         env:
@@ -151,7 +156,7 @@ jobs:
 
     env:
       PYTHON_VERSION: ${{ matrix.python-version }}
-      COVERAGE_FILE: ${{ github.workspace }}/${{ inputs.working-directory }}/${{ inputs.coverage-file }}
+      COVERAGE_XML: ${{ github.workspace }}/${{ inputs.working-directory }}/${{ inputs.coverage-file }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -234,7 +239,7 @@ jobs:
         if: inputs.coverage == 'orgoro' && github.event_name == 'pull_request'
         uses: orgoro/coverage@ca0c362dc1a4f100447309405e6dfea47e251495 # v3.3.1
         with:
-          coverageFile: ${{ env.COVERAGE_FILE }}
+          coverageFile: ${{ env.COVERAGE_XML }}
           token: ${{ github.token }}
           sourceDir: ${{ inputs.coverage-source-dir }}
           thresholdAll: ${{ inputs.coverage-threshold-all }}

@@ -1,0 +1,113 @@
+name: Self-test
+
+# CI for this repository: lints the workflows, tests the inline scripts, and runs
+# python-tests.yml against the fixture app with every installer and all services.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: self-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
+      # go run verifies the module against the Go checksum database.
+      - name: actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/*.yml templates/*.yml
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      # The token enables zizmor's online audits (e.g. that pinned SHAs exist upstream).
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uvx zizmor@1.30.1 --format=github .github/workflows templates
+
+  scripts:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Test the changelog and release scripts
+        run: node --test 'tests/*.test.mjs'
+
+  # Library style: Python matrix, pip-sync, orgoro coverage on PRs.
+  python-pip-sync:
+    uses: $/.github/workflows/python-tests.yml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      runs-on: ubuntu-latest
+      python-versions: '["3.11", "3.12", "3.13"]'
+      working-directory: tests/fixtures/python-app
+      test-command: pytest --cov=demo_app --cov-report=xml:"$COVERAGE_XML" tests
+      coverage-source-dir: tests/fixtures/python-app
+
+  python-pip:
+    uses: $/.github/workflows/python-tests.yml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      runs-on: ubuntu-latest
+      installer: pip
+      working-directory: tests/fixtures/python-app
+      test-command: pytest tests
+      coverage: none
+
+  python-uv:
+    uses: $/.github/workflows/python-tests.yml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      runs-on: ubuntu-latest
+      installer: uv
+      python-versions: '["3.12"]'
+      working-directory: tests/fixtures/python-app
+      test-command: pytest tests
+      coverage: none
+
+  # App backend style: PostGIS, Redis and Elasticsearch, with a DB setup command.
+  python-services:
+    uses: $/.github/workflows/python-tests.yml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      runs-on: ubuntu-latest
+      working-directory: tests/fixtures/python-app
+      postgres: true
+      postgres-db: demo_test
+      redis: true
+      elasticsearch-version: "9.2.1"
+      db-setup-command: docker exec "$PG_CONTAINER" psql -U postgres -d demo_test -c "create extension if not exists postgis;"
+      test-command: SERVICES=postgres,redis,elasticsearch ELASTICSEARCH_VERSION=9.2.1 pytest tests
+      coverage: none

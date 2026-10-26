@@ -247,7 +247,8 @@ jobs:
               for (const issue of milestoneIssues.filter((i) => !i.pull_request)) addRestIssue(issue);
             }
 
-            // b) PRs merged into develop whose commits are part of this release PR
+            // b) PRs merged into develop whose commits are part of this release PR.
+            // Keep the product of the `first:` limits under GitHub's 500,000 node limit.
             const query = `
               query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
                 repository(owner: $owner, name: $repo) {
@@ -258,7 +259,7 @@ jobs:
                         number title merged baseRefName headRefName
                         closingIssuesReferences(first: 25) { nodes {
                           number title repository { nameWithOwner }
-                          labels(first: 20) { nodes { name } }
+                          labels(first: 10) { nodes { name } }
                           issueType { name }
                         } }
                       } } } }
