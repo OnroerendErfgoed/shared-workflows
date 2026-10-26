@@ -1,0 +1,32 @@
+# Temporary end-to-end test of changelog-draft.yml and release-draft.yml (Phase 2).
+# Only exists on the e2e/* branches, which are deleted after the test.
+name: E2E release
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, closed]
+    branches: [e2e/base]
+
+permissions: {}
+
+jobs:
+  changelog-draft:
+    if: github.event.action != 'closed'
+    uses: $/.github/workflows/changelog-draft.yml
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: write
+    with:
+      source-branch: e2e/release
+      changelog-path: tests/fixtures/e2e/CHANGES.rst
+
+  release-draft:
+    if: github.event.action == 'closed'
+    uses: $/.github/workflows/release-draft.yml
+    permissions:
+      contents: write
+    with:
+      source-branch: e2e/release
+      changelog-path: tests/fixtures/e2e/CHANGES.rst
+      tag-prefix: e2e-
