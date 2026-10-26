@@ -1,0 +1,423 @@
+name: Changelog draft
+
+# Reusable workflow for a PR from develop into main/master titled "release x.y.z"
+# (the target branches are set by the caller's trigger):
+#  1. bumps the version in pyproject.toml (+ uv.lock) and package.json (+ package-lock.json)
+#  2. prepends a "x.y.z (DD-MM-YYYY)" section to the changelog, with the issues resolved in this
+#     release grouped as 💥 Breaking changes / 🐛 Bugs / ✨ Features / 🧹 Other
+#  3. commits that to the PR branch and posts (or updates) the list as a PR comment
+#
+# Issues are collected from:
+#  - the milestone named "x.y.z" or "vx.y.z"
+#  - the PRs merged into develop (or any other branch) whose commits are part of this release PR:
+#    issues they close ("fixes #123") and the issue number in their branch name (feature/123_foo)
+#
+# Grouping, first match wins:
+#  - 💥 Breaking changes: label "breaking"
+#  - 🐛 Bugs: issue type Bug, or label "bug" / "fix"
+#  - ✨ Features: issue type Feature or Task, or label "enhancement" / "feature"
+#  - 🧹 Other: everything else
+#
+# The changelog is CHANGES / CHANGELOG / HISTORY (.rst, .md or .txt), found at the shallowest
+# level in the repository (e.g. proces/CHANGES.rst), ignoring vendored and docs directories.
+# Use the changelog-path input to choose one explicitly.
+#
+# Pushes made with the default GITHUB_TOKEN do not trigger other workflows (e.g. the tests).
+# Pass a RELEASE_TOKEN secret (PAT or GitHub App token with contents:write) if CI should run
+# on the release commit, or if branch protection on the head branch blocks the default token.
+#
+# The calling job must grant `contents: write`, `issues: read` and `pull-requests: write`.
+
+on:
+  workflow_call:
+    inputs:
+      source-branch:
+        description: Only run for release PRs from this branch. Empty for any branch.
+        type: string
+        default: develop
+      changelog-path:
+        description: Changelog file(s) to update, comma-separated. Empty to find them automatically.
+        type: string
+        default: ""
+    secrets:
+      RELEASE_TOKEN:
+        description: Token used to push the release commit. Defaults to GITHUB_TOKEN.
+        required: false
+    outputs:
+      version:
+        description: The release version (x.y.z).
+        value: ${{ jobs.changelog-draft.outputs.version }}
+      changelog:
+        description: The new changelog section, without the version heading.
+        value: ${{ jobs.changelog-draft.outputs.changelog }}
+
+permissions: {}
+
+jobs:
+  changelog-draft:
+    # Only for open "release x.y.z" PRs from the source branch of this repository, and on edits
+    # only when the title changed. startsWith is case-insensitive in GitHub expressions.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.state == 'open' &&
+      startsWith(github.event.pull_request.title, 'release ') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (inputs.source-branch == '' || github.event.pull_request.head.ref == inputs.source-branch) &&
+      (github.event.action != 'edited' || github.event.changes.title)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: write
+    concurrency:
+      group: changelog-draft-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    outputs:
+      version: ${{ steps.prepare.outputs.version }}
+      changelog: ${{ steps.prepare.outputs.changelog }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+          persist-credentials: true # the release commit is pushed below
+
+      - name: Bump versions and update changelog
+        id: prepare
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          CHANGELOG_PATH: ${{ inputs.changelog-path }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            // ---------- Changelog helpers (same as in release-draft.yml) ----------
+            const CHANGELOG_NAME = /^(changes|changelog|history)\.(rst|md|txt)$/i;
+            const IGNORED_DIR = /(^|\/)(node_modules|vendor|vendored|third_party|site-packages|libraries|roles|docs?)\//i;
+            const UNDERLINE = /^([-=~^*#+])\1{2,}\s*$/;
+
+            // Explicit paths, or the changelogs at the shallowest level of the repository.
+            const findChangelogs = (trackedFiles, explicit) => {
+              if (explicit && explicit.trim()) return explicit.split(',').map((f) => f.trim()).filter(Boolean);
+              const found = trackedFiles.filter((f) => CHANGELOG_NAME.test(path.basename(f)) && !IGNORED_DIR.test(f));
+              const depth = (f) => f.split('/').length;
+              const minDepth = Math.min(...found.map(depth));
+              return found.filter((f) => depth(f) === minDepth).sort();
+            };
+
+            // "markdown" for "## 2.4.1 (01-06-2026)" headings, "underline" for "2.4.1 (01-06-2026)"
+            // followed by "------------------". Decided by the content; the extension is only a fallback.
+            const headingStyle = (file, lines) => {
+              for (let i = 0; i < lines.length; i++) {
+                if (/^#{1,6}\s+\[?v?\d+\.\d+\.\d+/.test(lines[i])) return 'markdown';
+                if (/^v?\d+\.\d+\.\d+/.test(lines[i]) && UNDERLINE.test(lines[i + 1] || '')) return 'underline';
+              }
+              return file.toLowerCase().endsWith('.md') ? 'markdown' : 'underline';
+            };
+
+            // The version of the section heading at line i, or null.
+            const headingVersion = (lines, i, style) => {
+              if (style === 'markdown') {
+                const m = lines[i].match(/^#{1,6}\s+\[?v?(\d+\.\d+\.\d+)/);
+                return m && m[1];
+              }
+              const m = lines[i].match(/^v?(\d+\.\d+\.\d+)/);
+              return m && UNDERLINE.test(lines[i + 1] || '') ? m[1] : null;
+            };
+
+            // ---------- Issue categories ----------
+            const CATEGORIES = [
+              { title: '💥 Breaking changes', labels: ['breaking', 'breaking change', 'breaking-change'], types: [] },
+              { title: '🐛 Bugs', labels: ['bug', 'fix'], types: ['bug'] },
+              { title: '✨ Features', labels: ['enhancement', 'feature'], types: ['feature', 'task'] },
+              { title: '🧹 Other', labels: [], types: [] },
+            ];
+            const categoryOf = (issue) => {
+              const labels = issue.labels.map((l) => l.toLowerCase());
+              const type = (issue.type || '').toLowerCase();
+              return CATEGORIES.find((c) => c.types.includes(type) || c.labels.some((l) => labels.includes(l)))
+                || CATEGORIES[CATEGORIES.length - 1];
+            };
+            const bullet = (issue) => `- ${issue.title.trim()} (#${issue.number})`;
+            // One block per non-empty category; headingPrefix is e.g. "###" for markdown, null for plain titles.
+            const renderSections = (issues, headingPrefix) => {
+              const lines = [];
+              for (const category of CATEGORIES) {
+                const items = issues.filter((issue) => categoryOf(issue) === category);
+                if (!items.length) continue;
+                if (lines.length) lines.push('');
+                lines.push(headingPrefix ? `${headingPrefix} ${category.title}` : category.title, '', ...items.map(bullet));
+              }
+              return lines;
+            };
+
+            const pr = context.payload.pull_request;
+            const match = pr.title.trim().match(/^release\s+v?(\d+\.\d+\.\d+)\s*$/i);
+            if (!match) {
+              core.setFailed(`PR title "${pr.title}" does not match "release x.y.z".`);
+              return;
+            }
+            const version = match[1];
+            const date = new Intl.DateTimeFormat('en-GB', {
+              timeZone: 'Europe/Brussels', day: '2-digit', month: '2-digit', year: 'numeric',
+            }).format(new Date()).replace(/\//g, '-');
+            const { owner, repo } = context.repo;
+            const repoFullName = `${owner}/${repo}`;
+            core.setOutput('version', version);
+
+            // ---------- 1. Version bumps ----------
+            const trackedFiles = (await exec.getExecOutput('git', ['ls-files'], { silent: true }))
+              .stdout.split('\n').filter(Boolean);
+            const bumped = [];
+
+            // pyproject.toml: first "version = ..." in [project] or [tool.poetry]
+            const projectNames = [];
+            for (const file of trackedFiles.filter((f) => path.basename(f) === 'pyproject.toml')) {
+              let section = '';
+              let done = false;
+              const lines = fs.readFileSync(file, 'utf8').split('\n').map((line) => {
+                const header = line.match(/^\s*\[([^\]]+)\]\s*$/);
+                if (header) section = header[1].trim();
+                if (['project', 'tool.poetry'].includes(section)) {
+                  const name = line.match(/^\s*name\s*=\s*["']([^"']+)["']/);
+                  if (name) projectNames.push(name[1]);
+                  if (!done && /^\s*version\s*=/.test(line)) {
+                    done = true;
+                    return line.replace(/(["'])[^"']*\1/, `"${version}"`);
+                  }
+                }
+                return line;
+              });
+              if (done) {
+                fs.writeFileSync(file, lines.join('\n'));
+                bumped.push(file);
+              }
+            }
+
+            // uv.lock: the project's own entry, so `uv sync --locked` keeps working
+            const normalize = (name) => name.toLowerCase().replace(/[-_.]+/g, '-');
+            for (const file of trackedFiles.filter((f) => path.basename(f) === 'uv.lock')) {
+              const content = fs.readFileSync(file, 'utf8');
+              const updated = content.replace(
+                /(\[\[package\]\]\nname = "([^"]+)"\nversion = ")[^"]*("\nsource = \{ (?:editable|virtual) = "\." \})/g,
+                (all, pre, name, post) =>
+                  projectNames.map(normalize).includes(normalize(name)) ? `${pre}${version}${post}` : all,
+              );
+              if (updated !== content) {
+                fs.writeFileSync(file, updated);
+                bumped.push(file);
+              }
+            }
+
+            // package.json (+ package-lock.json next to it), only when it has a version field
+            for (const file of trackedFiles.filter((f) => path.basename(f) === 'package.json' && !f.includes('node_modules/'))) {
+              const content = fs.readFileSync(file, 'utf8');
+              if (JSON.parse(content).version === undefined) continue;
+              fs.writeFileSync(file, content.replace(/("version"\s*:\s*")[^"]*(")/, `$1${version}$2`));
+              bumped.push(file);
+
+              const lockFile = path.join(path.dirname(file), 'package-lock.json');
+              if (fs.existsSync(lockFile)) {
+                const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+                lock.version = version;
+                if (lock.packages && lock.packages['']) lock.packages[''].version = version;
+                fs.writeFileSync(lockFile, JSON.stringify(lock, null, 2) + '\n');
+                bumped.push(lockFile);
+              }
+            }
+
+            // ---------- 2. Collect issues ----------
+            const issues = new Map(); // number -> { number, title, labels, type }
+            const unlinkedPrs = new Map(); // merged PRs without a linked issue
+            const addRestIssue = (issue) => issues.set(issue.number, {
+              number: issue.number,
+              title: issue.title,
+              labels: (issue.labels || []).map((l) => (typeof l === 'string' ? l : l.name)),
+              type: issue.type && issue.type.name,
+            });
+
+            // a) Milestone with the same version
+            const milestones = await github.paginate(github.rest.issues.listMilestones, { owner, repo, state: 'all' });
+            const milestone = milestones.find((m) => [version, `v${version}`].includes(m.title.trim()));
+            if (milestone) {
+              const milestoneIssues = await github.paginate(github.rest.issues.listForRepo, {
+                owner, repo, milestone: milestone.number, state: 'all',
+              });
+              for (const issue of milestoneIssues.filter((i) => !i.pull_request)) addRestIssue(issue);
+            }
+
+            // b) PRs merged into develop whose commits are part of this release PR
+            const query = `
+              query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    commits(first: 100, after: $cursor) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes { commit { associatedPullRequests(first: 10) { nodes {
+                        number title merged baseRefName headRefName
+                        closingIssuesReferences(first: 25) { nodes {
+                          number title repository { nameWithOwner }
+                          labels(first: 20) { nodes { name } }
+                          issueType { name }
+                        } }
+                      } } } }
+                    }
+                  }
+                }
+              }`;
+            const mergedPrs = new Map();
+            let cursor = null;
+            do {
+              const result = await github.graphql(query, { owner, repo, number: pr.number, cursor });
+              const commits = result.repository.pullRequest.commits;
+              for (const node of commits.nodes) {
+                for (const assoc of node.commit.associatedPullRequests.nodes) {
+                  if (assoc.merged && assoc.number !== pr.number && assoc.baseRefName !== pr.base.ref) {
+                    mergedPrs.set(assoc.number, assoc);
+                  }
+                }
+              }
+              cursor = commits.pageInfo.hasNextPage ? commits.pageInfo.endCursor : null;
+            } while (cursor);
+
+            for (const mergedPr of mergedPrs.values()) {
+              const linked = mergedPr.closingIssuesReferences.nodes.filter((i) => i.repository.nameWithOwner === repoFullName);
+              for (const issue of linked) {
+                issues.set(issue.number, {
+                  number: issue.number,
+                  title: issue.title,
+                  labels: issue.labels.nodes.map((l) => l.name),
+                  type: issue.issueType && issue.issueType.name,
+                });
+              }
+
+              // Branch naming convention: feature/123_description
+              const branchIssue = mergedPr.headRefName.match(/(?:^|\/)(\d+)(?:[_-]|$)/);
+              let branchIssueFound = false;
+              if (branchIssue) {
+                const number = Number(branchIssue[1]);
+                if (issues.has(number)) {
+                  branchIssueFound = true;
+                } else {
+                  try {
+                    const { data } = await github.rest.issues.get({ owner, repo, issue_number: number });
+                    if (!data.pull_request) {
+                      addRestIssue(data);
+                      branchIssueFound = true;
+                    }
+                  } catch (error) {
+                    if (error.status !== 404 && error.status !== 410) throw error;
+                  }
+                }
+              }
+              if (!linked.length && !branchIssueFound) unlinkedPrs.set(mergedPr.number, mergedPr.title);
+            }
+
+            const sortedIssues = [...issues.values()].sort((a, b) => a.number - b.number);
+            const sections = renderSections(sortedIssues, null);
+            core.setOutput('changelog', sections.join('\n'));
+
+            // ---------- 3. Update changelog(s) ----------
+            const changelogs = findChangelogs(trackedFiles, process.env.CHANGELOG_PATH);
+            const missing = changelogs.filter((f) => !fs.existsSync(f));
+            if (missing.length) {
+              core.setFailed(`Changelog not found: ${missing.join(', ')}`);
+              return;
+            }
+            const updatedChangelogs = [];
+            for (const file of changelogs) {
+              const lines = fs.readFileSync(file, 'utf8').split('\n');
+              const style = headingStyle(file, lines);
+              const headings = lines.map((_, i) => i).filter((i) => headingVersion(lines, i, style));
+              if (headings.some((i) => headingVersion(lines, i, style) === version)) continue;
+
+              const heading = `${version} (${date})`;
+              let insertAt = 0;
+              let block;
+              if (style === 'markdown') {
+                let level = '##';
+                if (headings.length) {
+                  insertAt = headings[0];
+                  level = lines[insertAt].match(/^#+/)[0];
+                } else if (/^#\s/.test(lines[0] || '')) {
+                  insertAt = lines.findIndex((l, i) => i > 0 && l.trim() !== '');
+                  if (insertAt < 0) insertAt = lines.length;
+                }
+                block = [`${level} ${heading}`, '', ...renderSections(sortedIssues, `${level}#`), ''];
+              } else {
+                let underline = '-';
+                if (headings.length) {
+                  insertAt = headings[0];
+                  underline = lines[insertAt + 1].trim()[0];
+                }
+                block = [heading, underline.repeat(heading.length), '', ...sections, ''];
+              }
+
+              lines.splice(insertAt, 0, ...block);
+              fs.writeFileSync(file, lines.join('\n'));
+              updatedChangelogs.push(file);
+            }
+
+            // ---------- PR comment ----------
+            const comment = [
+              '<!-- prepare-release-comment -->',
+              `## Release ${version} (${date})`,
+              '',
+              milestone
+                ? `Issues from milestone [${milestone.title}](${milestone.html_url}) and from the PRs merged in this release:`
+                : `Issues from the PRs merged in this release (no milestone named \`${version}\` found):`,
+              '',
+              // Fenced code block so GitHub shows the raw list instead of expanding the #references
+              ...(sections.length ? ['```markdown', ...sections, '```'] : ['_No issues found._']),
+              '',
+            ];
+            if (unlinkedPrs.size) {
+              comment.push(
+                '<details><summary>Merged PRs without a linked issue (not added to the changelog)</summary>',
+                '',
+                ...[...unlinkedPrs.entries()].sort(([a], [b]) => a - b).map(([n, t]) => `- ${t.trim()} (#${n})`),
+                '',
+                '</details>',
+                '',
+              );
+            }
+            comment.push(
+              `**Version bumped in:** ${bumped.length ? bumped.map((f) => `\`${f}\``).join(', ') : '_no version files found_'}`,
+              `**Changelog updated:** ${updatedChangelogs.length ? updatedChangelogs.map((f) => `\`${f}\``).join(', ') : `_none (no changelog found or ${version} already present)_`}`,
+            );
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'release-comment.md'), comment.join('\n'));
+
+      - name: Commit and push
+        if: steps.prepare.outputs.version
+        env:
+          VERSION: ${{ steps.prepare.outputs.version }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+          else
+            git commit -m "Release $VERSION"
+            git push origin "HEAD:$HEAD_REF"
+          fi
+
+      - name: Comment on PR
+        if: steps.prepare.outputs.version
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync(`${process.env.RUNNER_TEMP}/release-comment.md`, 'utf8');
+            const marker = '<!-- prepare-release-comment -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find((c) => c.user.type === 'Bot' && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

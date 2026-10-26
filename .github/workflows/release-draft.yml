@@ -1,0 +1,199 @@
+name: Release draft
+
+# Reusable workflow for a merged PR from develop into main/master (the release PR that
+# changelog-draft.yml prepared; the target branches are set by the caller's trigger):
+#  1. determines the version x.y.z from the PR title (typically "release x.y.z"),
+#     or else from the topmost "x.y.z (DD-MM-YYYY)" heading in the changelog
+#  2. takes that version's section of the changelog as release notes
+#  3. creates a draft GitHub release with tag "<tag-prefix>x.y.z" on the merge commit
+#     (or updates the existing draft release for that tag)
+#
+# The tag itself is only created once the draft release is published.
+# The changelog is found the same way as in changelog-draft.yml.
+#
+# The calling job must grant `contents: write`.
+
+on:
+  workflow_call:
+    inputs:
+      source-branch:
+        description: Only run for merged PRs from this branch. Empty for any branch.
+        type: string
+        default: develop
+      changelog-path:
+        description: Changelog to read the release notes from. Empty to find it automatically.
+        type: string
+        default: ""
+      tag-prefix:
+        description: Prefix for the tag and release name, e.g. "v".
+        type: string
+        default: ""
+      prerelease:
+        description: Mark the draft release as a pre-release.
+        type: boolean
+        default: false
+    outputs:
+      version:
+        description: The release version (x.y.z).
+        value: ${{ jobs.release-draft.outputs.version }}
+      tag_name:
+        description: Tag of the draft release.
+        value: ${{ jobs.release-draft.outputs.tag_name }}
+      html_url:
+        description: URL of the draft release.
+        value: ${{ jobs.release-draft.outputs.html_url }}
+
+permissions: {}
+
+jobs:
+  release-draft:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      (inputs.source-branch == '' || github.event.pull_request.head.ref == inputs.source-branch)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-draft-${{ github.repository }}-${{ github.event.pull_request.base.ref }}
+      cancel-in-progress: false
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      html_url: ${{ steps.release.outputs.html_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: false
+
+      - name: Create draft release
+        id: release
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          CHANGELOG_PATH: ${{ inputs.changelog-path }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            // ---------- Changelog helpers (same as in changelog-draft.yml) ----------
+            const CHANGELOG_NAME = /^(changes|changelog|history)\.(rst|md|txt)$/i;
+            const IGNORED_DIR = /(^|\/)(node_modules|vendor|vendored|third_party|site-packages|libraries|roles|docs?)\//i;
+            const UNDERLINE = /^([-=~^*#+])\1{2,}\s*$/;
+
+            // Explicit paths, or the changelogs at the shallowest level of the repository.
+            const findChangelogs = (trackedFiles, explicit) => {
+              if (explicit && explicit.trim()) return explicit.split(',').map((f) => f.trim()).filter(Boolean);
+              const found = trackedFiles.filter((f) => CHANGELOG_NAME.test(path.basename(f)) && !IGNORED_DIR.test(f));
+              const depth = (f) => f.split('/').length;
+              const minDepth = Math.min(...found.map(depth));
+              return found.filter((f) => depth(f) === minDepth).sort();
+            };
+
+            // "markdown" for "## 2.4.1 (01-06-2026)" headings, "underline" for "2.4.1 (01-06-2026)"
+            // followed by "------------------". Decided by the content; the extension is only a fallback.
+            const headingStyle = (file, lines) => {
+              for (let i = 0; i < lines.length; i++) {
+                if (/^#{1,6}\s+\[?v?\d+\.\d+\.\d+/.test(lines[i])) return 'markdown';
+                if (/^v?\d+\.\d+\.\d+/.test(lines[i]) && UNDERLINE.test(lines[i + 1] || '')) return 'underline';
+              }
+              return file.toLowerCase().endsWith('.md') ? 'markdown' : 'underline';
+            };
+
+            // The version of the section heading at line i, or null.
+            const headingVersion = (lines, i, style) => {
+              if (style === 'markdown') {
+                const m = lines[i].match(/^#{1,6}\s+\[?v?(\d+\.\d+\.\d+)/);
+                return m && m[1];
+              }
+              const m = lines[i].match(/^v?(\d+\.\d+\.\d+)/);
+              return m && UNDERLINE.test(lines[i + 1] || '') ? m[1] : null;
+            };
+
+            // Category titles written by changelog-draft.yml; shown as headings in the release notes.
+            const CATEGORY_TITLES = ['💥 Breaking changes', '🐛 Bugs', '✨ Features', '🧹 Other'];
+
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const versionRe = /\bv?(\d+\.\d+\.\d+)\b/;
+
+            const trackedFiles = (await exec.getExecOutput('git', ['ls-files'], { silent: true }))
+              .stdout.split('\n').filter(Boolean);
+            const changelog = findChangelogs(trackedFiles, process.env.CHANGELOG_PATH)[0];
+            if (changelog && !fs.existsSync(changelog)) {
+              core.setFailed(`Changelog not found: ${changelog}`);
+              return;
+            }
+            const lines = changelog ? fs.readFileSync(changelog, 'utf8').split(/\r?\n/) : [];
+            const style = changelog ? headingStyle(changelog, lines) : 'underline';
+            const headings = lines.map((_, i) => i).filter((i) => headingVersion(lines, i, style));
+
+            // ---------- 1. Version ----------
+            let version;
+            const titleMatch = pr.title.match(versionRe);
+            if (titleMatch) {
+              version = titleMatch[1];
+              core.info(`Version ${version} taken from PR title "${pr.title}".`);
+            } else if (headings.length) {
+              version = headingVersion(lines, headings[0], style);
+              core.info(`Version ${version} taken from the first heading in ${changelog}.`);
+            } else {
+              core.setFailed(`No x.y.z version found in PR title "${pr.title}" or in a changelog.`);
+              return;
+            }
+
+            // ---------- 2. Release notes ----------
+            let body = '';
+            const index = headings.findIndex((i) => headingVersion(lines, i, style) === version);
+            if (index >= 0) {
+              const start = headings[index] + (style === 'markdown' ? 1 : 2);
+              const end = index + 1 < headings.length ? headings[index + 1] : lines.length;
+              body = lines.slice(start, end)
+                .map((line) => (CATEGORY_TITLES.includes(line.trim()) ? `### ${line.trim()}` : line))
+                .join('\n').trim();
+            }
+            if (body) {
+              core.info(`Release notes taken from ${changelog}:\n${body}`);
+            } else {
+              core.warning(`No changelog entry found for ${version}; creating the draft release without notes.`);
+            }
+
+            // ---------- 3. Draft release ----------
+            const tagName = `${process.env.TAG_PREFIX || ''}${version}`;
+            const release = {
+              owner,
+              repo,
+              tag_name: tagName,
+              name: tagName,
+              body,
+              draft: true,
+              prerelease: process.env.PRERELEASE === 'true',
+              target_commitish: pr.merge_commit_sha,
+            };
+
+            // Draft releases are not returned by getReleaseByTag, so look through the list.
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 });
+            const existing = releases.find((r) => r.tag_name === tagName);
+            let result;
+            if (existing && !existing.draft) {
+              core.setFailed(`Release ${tagName} is already published: ${existing.html_url}`);
+              return;
+            } else if (existing) {
+              ({ data: result } = await github.rest.repos.updateRelease({ ...release, release_id: existing.id }));
+              core.info(`Updated draft release ${tagName}: ${result.html_url}`);
+            } else {
+              ({ data: result } = await github.rest.repos.createRelease(release));
+              core.info(`Created draft release ${tagName}: ${result.html_url}`);
+            }
+
+            core.setOutput('version', version);
+            core.setOutput('tag_name', tagName);
+            core.setOutput('html_url', result.html_url);
+            await core.summary
+              .addHeading(`Draft release ${tagName}`)
+              .addLink(result.html_url, result.html_url)
+              .addCodeBlock(body || '(no release notes)', 'markdown')
+              .write();
