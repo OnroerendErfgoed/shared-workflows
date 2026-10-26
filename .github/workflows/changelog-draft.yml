@@ -1,6 +1,7 @@
 name: Changelog draft
 
-# Reusable workflow for a PR into main/master titled "release x.y.z":
+# Reusable workflow for a PR from develop into main/master titled "release x.y.z"
+# (the target branches are set by the caller's trigger):
 #  1. bumps the version in pyproject.toml (+ uv.lock) and package.json (+ package-lock.json)
 #  2. prepends a "x.y.z (DD-MM-YYYY)" section to the changelog, with the issues resolved in this
 #     release grouped as 💥 Breaking changes / 🐛 Bugs / ✨ Features / 🧹 Other
@@ -30,6 +31,10 @@ name: Changelog draft
 on:
   workflow_call:
     inputs:
+      source-branch:
+        description: Only run for release PRs from this branch. Empty for any branch.
+        type: string
+        default: develop
       changelog-path:
         description: Changelog file(s) to update, comma-separated. Empty to find them automatically.
         type: string
@@ -50,12 +55,14 @@ permissions: {}
 
 jobs:
   changelog-draft:
-    # Only for "release x.y.z" PRs from this repository, and on edits only when the title changed.
-    # startsWith is case-insensitive in GitHub expressions.
+    # Only for open "release x.y.z" PRs from the source branch of this repository, and on edits
+    # only when the title changed. startsWith is case-insensitive in GitHub expressions.
     if: >-
       github.event_name == 'pull_request' &&
+      github.event.pull_request.state == 'open' &&
       startsWith(github.event.pull_request.title, 'release ') &&
       github.event.pull_request.head.repo.full_name == github.repository &&
+      (inputs.source-branch == '' || github.event.pull_request.head.ref == inputs.source-branch) &&
       (github.event.action != 'edited' || github.event.changes.title)
     runs-on: ubuntu-latest
     permissions:

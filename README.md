@@ -5,8 +5,8 @@ Reusable GitHub Actions workflows for the OnroerendErfgoed repositories. A proje
 | Workflow | Does | Caller template |
 | --- | --- | --- |
 | [`python-tests.yml`](.github/workflows/python-tests.yml) | Installs a Python project, starts PostGIS / Redis / Elasticsearch, lints, runs the tests and reports coverage | [`templates/ci.yml`](templates/ci.yml) |
-| [`changelog-draft.yml`](.github/workflows/changelog-draft.yml) | On a `release x.y.z` PR: bumps the version and writes the grouped changelog section to the PR branch | [`templates/release.yml`](templates/release.yml) |
-| [`release-draft.yml`](.github/workflows/release-draft.yml) | When that PR is merged: creates a draft GitHub release from the changelog section | [`templates/release.yml`](templates/release.yml) |
+| [`changelog-draft.yml`](.github/workflows/changelog-draft.yml) | When a `release x.y.z` PR from `develop` into `main`/`master` is opened: bumps the version and writes the grouped changelog section to the PR branch | [`templates/changelog-draft.yml`](templates/changelog-draft.yml) |
+| [`release-draft.yml`](.github/workflows/release-draft.yml) | When that PR is merged: creates a draft GitHub release from the changelog section | [`templates/release-draft.yml`](templates/release-draft.yml) |
 | [`pr-labeler.yml`](.github/workflows/pr-labeler.yml) | Labels a PR based on its branch name | [`templates/pr-labeler.yml`](templates/pr-labeler.yml) |
 
 Call them with the major version tag:
@@ -57,7 +57,7 @@ Permissions: `contents: read`, `pull-requests: write`. Secrets: none.
 
 ## `changelog-draft.yml`
 
-Runs for pull requests titled `release x.y.z` from the same repository (opened, reopened, or title edited). It:
+Runs for open pull requests from `develop` (see `source-branch`) titled `release x.y.z`, when they are opened, reopened, or their title is edited. The caller's trigger limits the target branches to `main`/`master`. It:
 
 1. bumps the version in every `pyproject.toml` (+ `uv.lock`) and `package.json` (+ `package-lock.json`);
 2. collects the issues of this release: the milestone `x.y.z`, the issues closed by the PRs merged into `develop` that are part of this release, and issue numbers in their branch names (`feature/123_foo`);
@@ -77,6 +77,7 @@ The changelog is `CHANGES`, `CHANGELOG` or `HISTORY` (`.rst`, `.md` or `.txt`) a
 
 | Input | Type | Default | Description |
 | --- | --- | --- | --- |
+| `source-branch` | string | `develop` | Only run for PRs from this branch. Empty for any branch. |
 | `changelog-path` | string | `""` | Changelog(s) to update, comma-separated, instead of finding them. |
 
 | Secret | Required | Description |
@@ -92,10 +93,11 @@ Permissions: `contents: write`, `issues: read`, `pull-requests: write`.
 
 ## `release-draft.yml`
 
-Runs when a pull request is merged. Takes the version from the PR title, or from the topmost heading in the changelog, and creates (or updates) a **draft** release with that version's changelog section as notes, targeting the merge commit. Category lines become `###` headings. The tag is created when someone publishes the draft.
+Runs when a pull request from `develop` (see `source-branch`) into `main`/`master` is merged, as a separate workflow from the changelog draft. Takes the version from the PR title, or from the topmost heading in the changelog, and creates (or updates) a **draft** release with that version's changelog section as notes, targeting the merge commit. Category lines become `###` headings. The tag is created when someone publishes the draft.
 
 | Input | Type | Default | Description |
 | --- | --- | --- | --- |
+| `source-branch` | string | `develop` | Only run for merged PRs from this branch. Empty for any branch. |
 | `changelog-path` | string | `""` | Changelog to read, instead of finding it. |
 | `tag-prefix` | string | `""` | Prefix for tag and release name, e.g. `v`. |
 | `prerelease` | boolean | `false` | Mark the release as a pre-release. |

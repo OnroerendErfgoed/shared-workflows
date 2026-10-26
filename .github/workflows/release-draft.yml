@@ -1,6 +1,7 @@
 name: Release draft
 
-# Reusable workflow for a merged PR into main/master:
+# Reusable workflow for a merged PR from develop into main/master (the release PR that
+# changelog-draft.yml prepared; the target branches are set by the caller's trigger):
 #  1. determines the version x.y.z from the PR title (typically "release x.y.z"),
 #     or else from the topmost "x.y.z (DD-MM-YYYY)" heading in the changelog
 #  2. takes that version's section of the changelog as release notes
@@ -15,6 +16,10 @@ name: Release draft
 on:
   workflow_call:
     inputs:
+      source-branch:
+        description: Only run for merged PRs from this branch. Empty for any branch.
+        type: string
+        default: develop
       changelog-path:
         description: Changelog to read the release notes from. Empty to find it automatically.
         type: string
@@ -42,7 +47,10 @@ permissions: {}
 
 jobs:
   release-draft:
-    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      (inputs.source-branch == '' || github.event.pull_request.head.ref == inputs.source-branch)
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -1,0 +1,18 @@
+# Caller for the shared release draft. Copy to .github/workflows/ in a project repo.
+#
+# When the release PR from develop into main/master is merged, a draft GitHub release x.y.z
+# is created from that version's changelog section.
+name: Release draft
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main, master]
+
+permissions: {}
+
+jobs:
+  release-draft:
+    uses: OnroerendErfgoed/shared-workflows/.github/workflows/release-draft.yml@v1
+    permissions:
+      contents: write
