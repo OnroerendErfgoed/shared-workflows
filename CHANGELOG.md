@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `changelog-draft.yml`: sub-issues are listed under their top-level parent issue, in the parent's category. The parent is shown even when it is not part of the release. Issue type `Collection` counts as a feature. `.rst` changelogs get blank lines around the nested lists.
+
 ## 1.0.0 (2026-10-26)
 
 First version of the shared workflows.

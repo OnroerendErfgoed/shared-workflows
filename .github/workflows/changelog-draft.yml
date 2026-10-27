@@ -130,7 +130,7 @@ jobs:
             const CATEGORIES = [
               { title: '💥 Breaking changes', labels: ['breaking', 'breaking change', 'breaking-change'], types: [] },
               { title: '🐛 Bugs', labels: ['bug', 'fix'], types: ['bug'] },
-              { title: '✨ Features', labels: ['enhancement', 'feature'], types: ['feature', 'task'] },
+              { title: '✨ Features', labels: ['enhancement', 'feature'], types: ['feature', 'task', 'collection'] },
               { title: '🧹 Other', labels: [], types: [] },
             ];
             const categoryOf = (issue) => {
@@ -139,15 +139,28 @@ jobs:
               return CATEGORIES.find((c) => c.types.includes(type) || c.labels.some((l) => labels.includes(l)))
                 || CATEGORIES[CATEGORIES.length - 1];
             };
-            const bullet = (issue) => `- ${issue.title.trim()} (#${issue.number})`;
+            // "#12", or "owner/repo#12" for a parent issue in another repository.
+            const entry = (issue) => {
+              const ref = issue.repo && issue.repo !== repoFullName ? `${issue.repo}#${issue.number}` : `#${issue.number}`;
+              return `${issue.title.trim()} (${ref})`;
+            };
             // One block per non-empty category; headingPrefix is e.g. "###" for markdown, null for plain titles.
-            const renderSections = (issues, headingPrefix) => {
+            // A group is a top-level issue with its sub-issues, and goes in the category of the top-level issue.
+            // reStructuredText needs blank lines around a nested list.
+            const renderSections = (groups, headingPrefix, rst = false) => {
               const lines = [];
               for (const category of CATEGORIES) {
-                const items = issues.filter((issue) => categoryOf(issue) === category);
+                const items = groups.filter((group) => categoryOf(group.issue) === category);
                 if (!items.length) continue;
                 if (lines.length) lines.push('');
-                lines.push(headingPrefix ? `${headingPrefix} ${category.title}` : category.title, '', ...items.map(bullet));
+                lines.push(headingPrefix ? `${headingPrefix} ${category.title}` : category.title, '');
+                items.forEach((group, i) => {
+                  lines.push(`- ${entry(group.issue)}`);
+                  if (!group.children.length) return;
+                  if (rst) lines.push('');
+                  lines.push(...group.children.map((child) => `  - ${entry(child)}`));
+                  if (rst && i < items.length - 1) lines.push('');
+                });
               }
               return lines;
             };
@@ -315,8 +328,71 @@ jobs:
               if (!linked.length && !branchIssueFound) unlinkedPrs.set(mergedPr.number, mergedPr.title);
             }
 
-            const sortedIssues = [...issues.values()].sort((a, b) => a.number - b.number);
-            const sections = renderSections(sortedIssues, null);
+            // c) Parent issues: sub-issues are listed under their top-level parent issue, which is
+            // shown even when it is not part of this release. Without the lookup the list stays flat.
+            const ISSUE_FIELDS = 'id number title repository { nameWithOwner } labels(first: 10) { nodes { name } } issueType { name }';
+            const toIssue = (node) => ({
+              number: node.number,
+              title: node.title,
+              labels: node.labels.nodes.map((l) => l.name),
+              type: node.issueType && node.issueType.name,
+              repo: node.repository.nameWithOwner,
+            });
+            const issueById = new Map(); // node id -> issue
+            const parentById = new Map(); // node id -> parent node id, or null
+            const idByNumber = new Map(); // released issue number -> node id
+            const addParent = (id, parent) => {
+              parentById.set(id, parent ? parent.id : null);
+              if (parent && !issueById.has(parent.id)) issueById.set(parent.id, toIssue(parent));
+            };
+            const chunks = (list, size) => Array.from({ length: Math.ceil(list.length / size) }, (_, i) => list.slice(i * size, (i + 1) * size));
+            try {
+              for (const numbers of chunks([...issues.keys()], 50)) {
+                const aliases = numbers.map((n) => `i${n}: issue(number: ${n}) { id parent { ${ISSUE_FIELDS} } }`).join('\n');
+                const result = await github.graphql(
+                  `query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { ${aliases} } }`,
+                  { owner, repo },
+                );
+                for (const n of numbers) {
+                  const node = result.repository[`i${n}`];
+                  if (!node) continue;
+                  idByNumber.set(n, node.id);
+                  issueById.set(node.id, { ...issues.get(n), repo: repoFullName });
+                  addParent(node.id, node.parent);
+                }
+              }
+              // Parents of parents, up to GitHub's 8 levels of sub-issues.
+              for (let level = 0; level < 8; level++) {
+                const pending = [...new Set(parentById.values())].filter((id) => id && !parentById.has(id));
+                if (!pending.length) break;
+                for (const ids of chunks(pending, 50)) {
+                  const result = await github.graphql(
+                    `query($ids: [ID!]!) { nodes(ids: $ids) { ... on Issue { id parent { ${ISSUE_FIELDS} } } } }`,
+                    { ids },
+                  );
+                  for (const node of result.nodes.filter(Boolean)) addParent(node.id, node.parent);
+                  for (const id of ids) if (!parentById.has(id)) parentById.set(id, null);
+                }
+              }
+            } catch (error) {
+              core.warning(`Could not look up parent issues, listing sub-issues separately: ${error.message}`);
+              idByNumber.clear();
+            }
+            const rootOf = (id) => {
+              let root = id;
+              while (parentById.get(root)) root = parentById.get(root);
+              return root;
+            };
+
+            const groups = new Map(); // root key -> { issue, children }
+            for (const issue of [...issues.values()].sort((a, b) => a.number - b.number)) {
+              const id = idByNumber.get(issue.number);
+              const root = id ? rootOf(id) : `#${issue.number}`;
+              if (!groups.has(root)) groups.set(root, { issue: id ? issueById.get(root) : issue, children: [] });
+              if (root !== id && id) groups.get(root).children.push(issue);
+            }
+            const sortedGroups = [...groups.values()].sort((a, b) => a.issue.number - b.issue.number);
+            const sections = renderSections(sortedGroups, null);
             core.setOutput('changelog', sections.join('\n'));
 
             // ---------- 3. Update changelog(s) ----------
@@ -345,14 +421,15 @@ jobs:
                   insertAt = lines.findIndex((l, i) => i > 0 && l.trim() !== '');
                   if (insertAt < 0) insertAt = lines.length;
                 }
-                block = [`${level} ${heading}`, '', ...renderSections(sortedIssues, `${level}#`), ''];
+                block = [`${level} ${heading}`, '', ...renderSections(sortedGroups, `${level}#`), ''];
               } else {
                 let underline = '-';
                 if (headings.length) {
                   insertAt = headings[0];
                   underline = lines[insertAt + 1].trim()[0];
                 }
-                block = [heading, underline.repeat(heading.length), '', ...sections, ''];
+                const rst = file.toLowerCase().endsWith('.rst');
+                block = [heading, underline.repeat(heading.length), '', ...(rst ? renderSections(sortedGroups, null, true) : sections), ''];
               }
 
               lines.splice(insertAt, 0, ...block);

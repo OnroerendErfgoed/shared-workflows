@@ -90,3 +90,13 @@ test('keeps markdown category headings as they are', async () => {
   assert.deepEqual(failures, []);
   assert.equal(github.calls.createRelease[0].body, '### 🐛 Bugs\n\n- Fout (#11)');
 });
+
+test('keeps sub-issues nested under their parent issue', async () => {
+  const section = '✨ Features\n\n- Exports (#60)\n\n  - Exporteer PDF (#22)\n  - Exporteer CSV (#23)\n\n- Nieuwe kaart (#61)';
+  const dir = makeRepo({ 'CHANGES.rst': `1.3.0 (26-10-2026)\n------------------\n\n${section}\n` });
+  const github = mockGithub();
+  const { failures } = await runScript(script, { dir, github, pullRequest });
+
+  assert.deepEqual(failures, []);
+  assert.equal(github.calls.createRelease[0].body, `### ${section}`);
+});

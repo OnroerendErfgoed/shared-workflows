@@ -71,8 +71,18 @@ Each issue is listed once, in the first category it matches. Empty categories ar
 | --- | --- |
 | 💥 Breaking changes | label `breaking` |
 | 🐛 Bugs | issue type `Bug`, or label `bug` / `fix` |
-| ✨ Features | issue type `Feature` or `Task`, or label `enhancement` / `feature` |
+| ✨ Features | issue type `Feature`, `Task` or `Collection`, or label `enhancement` / `feature` |
 | 🧹 Other | everything else |
+
+Sub-issues are listed under their top-level parent issue, in the parent's category, also when the parent itself is not part of the release (deeper sub-issues are listed under the top-level parent too). A parent in another repository is shown as `owner/repo#123`. In `.rst` changelogs the nested list gets the blank lines reStructuredText needs. If the parents can't be looked up, the issues are listed without nesting and the run shows a warning.
+
+```
+✨ Features
+
+- Extra data type - rapporten archeologie (#291)
+  - Dupliceer notas & toelatingen_archeologie types (#293)
+  - Rename ArcheologieGisPubliekMatview (#303)
+```
 
 The changelog is `CHANGES`, `CHANGELOG` or `HISTORY` (`.rst`, `.md` or `.txt`) at the shallowest level where one exists, so `proces/CHANGES.rst` is found when there is none at the root. `node_modules`, vendored directories (`vendor`, `libraries`, `roles`, …) and `docs` are ignored. The heading style is taken from the file's content: `## x.y.z (date)` headings get `### 💥 Breaking changes` sub-headings, underlined `x.y.z (date)` headings get plain category lines.
 
