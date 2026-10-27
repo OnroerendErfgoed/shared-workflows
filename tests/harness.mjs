@@ -42,17 +42,51 @@ export function makeRepo(files) {
 export const read = (dir, file) => fs.readFileSync(path.join(dir, file), 'utf8');
 
 // Minimal GitHub API mock. Paginated endpoints return arrays, direct calls return { data }.
-export function mockGithub({ milestones = [], milestoneIssues = [], mergedPrs = [], issues = {}, releases = [] } = {}) {
+// issueNodes describes the sub-issue tree for GraphQL:
+// { id: { number, title, repo?, type?, labels?, parent?: id } }. Issues of the demo repo
+// that are not in it have no parent. parentLookupError makes the parent queries fail.
+export function mockGithub({
+  milestones = [], milestoneIssues = [], mergedPrs = [], issues = {}, releases = [], issueNodes = {}, parentLookupError,
+} = {}) {
   const calls = { createRelease: [], updateRelease: [] };
+  const toNode = (id) => {
+    const node = issueNodes[id];
+    return {
+      id,
+      number: node.number,
+      title: node.title,
+      repository: { nameWithOwner: node.repo || 'OnroerendErfgoed/demo' },
+      labels: { nodes: (node.labels || []).map((name) => ({ name })) },
+      issueType: node.type ? { name: node.type } : null,
+    };
+  };
+  const withParent = (id) => {
+    const parent = issueNodes[id] && issueNodes[id].parent;
+    return { id, parent: parent ? toNode(parent) : null };
+  };
+  const idOf = (number) => Object.keys(issueNodes).find(
+    (id) => issueNodes[id].number === number && !issueNodes[id].repo,
+  ) || `I_${number}`;
   const github = {
     calls,
     paginate: async (fn, params) => fn(params),
-    graphql: async () => ({
-      repository: { pullRequest: { commits: {
-        pageInfo: { hasNextPage: false, endCursor: null },
-        nodes: [{ commit: { associatedPullRequests: { nodes: mergedPrs } } }],
-      } } },
-    }),
+    graphql: async (query, variables) => {
+      if (query.includes('pullRequest(number')) {
+        return {
+          repository: { pullRequest: { commits: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: [{ commit: { associatedPullRequests: { nodes: mergedPrs } } }],
+          } } },
+        };
+      }
+      if (parentLookupError) throw new Error(parentLookupError);
+      if (variables.ids) return { nodes: variables.ids.map(withParent) };
+      const repository = {};
+      for (const [, alias, number] of query.matchAll(/(i\d+): issue\(number: (\d+)\)/g)) {
+        repository[alias] = withParent(idOf(Number(number)));
+      }
+      return { repository };
+    },
     rest: {
       issues: {
         listMilestones: async () => milestones,
@@ -82,12 +116,13 @@ export function mockGithub({ milestones = [], milestoneIssues = [], mergedPrs = 
 export async function runScript(script, { dir, github, pullRequest, env = {} }) {
   const outputs = {};
   const failures = [];
+  const warnings = [];
   const summary = { addHeading: () => summary, addLink: () => summary, addCodeBlock: () => summary, write: async () => {} };
   const core = {
     setOutput: (name, value) => { outputs[name] = value; },
     setFailed: (message) => { failures.push(message); },
     info: () => {},
-    warning: () => {},
+    warning: (message) => { warnings.push(message); },
     summary,
   };
   const exec = {
@@ -105,5 +140,5 @@ export async function runScript(script, { dir, github, pullRequest, env = {} }) 
     process.chdir(previousCwd);
     process.env = previousEnv;
   }
-  return { outputs, failures };
+  return { outputs, failures, warnings };
 }

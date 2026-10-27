@@ -136,6 +136,104 @@ test('fails when changelog-path points to a missing file', async () => {
   assert.deepEqual(failures, ['Changelog not found: proces/CHANGES.rst']);
 });
 
+// Sub-issues: #21 under the released #20; #22 and #23 (via #61) under the unreleased
+// collection #60; #25 under #70 in another repository; #24 has no parent.
+const subIssueGithub = (options = {}) => mockGithub({
+  milestones: [{ number: 5, title: '1.3.0', html_url: 'https://github.com/m/5' }],
+  milestoneIssues: [
+    { number: 20, title: 'Nieuwe kaart', labels: [], type: { name: 'Feature' } },
+    { number: 21, title: 'Kaart legende', labels: [], type: { name: 'Bug' } },
+    { number: 22, title: 'Exporteer PDF', labels: [], type: { name: 'Task' } },
+    { number: 23, title: 'Exporteer CSV', labels: [], type: null },
+    { number: 24, title: 'Crash bij login', labels: [], type: { name: 'Bug' } },
+    { number: 25, title: 'Subtaak elders', labels: [], type: null },
+  ],
+  issueNodes: {
+    I20: { number: 20, title: 'Nieuwe kaart', type: 'Feature' },
+    I21: { number: 21, title: 'Kaart legende', type: 'Bug', parent: 'I20' },
+    I22: { number: 22, title: 'Exporteer PDF', type: 'Task', parent: 'I60' },
+    I23: { number: 23, title: 'Exporteer CSV', parent: 'I61' },
+    I25: { number: 25, title: 'Subtaak elders', parent: 'X70' },
+    I60: { number: 60, title: 'Exports', type: 'Collection' },
+    I61: { number: 61, title: 'Export deel', type: 'Task', parent: 'I60' },
+    X70: { number: 70, title: 'Gedeelde login', type: 'Bug', repo: 'OnroerendErfgoed/other' },
+  },
+  ...options,
+});
+
+test('lists sub-issues under their top-level parent issue', async () => {
+  const dir = makeRepo({ 'CHANGES.txt': RST_CHANGELOG });
+  const { outputs, failures, warnings } = await runScript(script, { dir, github: subIssueGithub(), pullRequest });
+
+  assert.deepEqual(failures, []);
+  assert.deepEqual(warnings, []);
+  const expected = [
+    '🐛 Bugs',
+    '',
+    '- Crash bij login (#24)',
+    '- Gedeelde login (OnroerendErfgoed/other#70)',
+    '  - Subtaak elders (#25)',
+    '',
+    '✨ Features',
+    '',
+    '- Nieuwe kaart (#20)',
+    '  - Kaart legende (#21)',
+    '- Exports (#60)',
+    '  - Exporteer PDF (#22)',
+    '  - Exporteer CSV (#23)',
+  ].join('\n');
+  assert.equal(outputs.changelog, expected);
+  assert.equal(read(dir, 'CHANGES.txt').replace(DATE, 'DATE'), `1.3.0 (DATE)\n------------------\n\n${expected}\n\n${RST_CHANGELOG}`);
+  assert.match(read(dir, 'release-comment.md'), /- Exports \(#60\)\n {2}- Exporteer PDF \(#22\)/);
+});
+
+test('puts blank lines around sub-issue lists in an rst changelog', async () => {
+  const dir = makeRepo({ 'CHANGES.rst': RST_CHANGELOG });
+  const { failures } = await runScript(script, { dir, github: subIssueGithub(), pullRequest });
+
+  assert.deepEqual(failures, []);
+  const expected = [
+    '🐛 Bugs',
+    '',
+    '- Crash bij login (#24)',
+    '- Gedeelde login (OnroerendErfgoed/other#70)',
+    '',
+    '  - Subtaak elders (#25)',
+    '',
+    '✨ Features',
+    '',
+    '- Nieuwe kaart (#20)',
+    '',
+    '  - Kaart legende (#21)',
+    '',
+    '- Exports (#60)',
+    '',
+    '  - Exporteer PDF (#22)',
+    '  - Exporteer CSV (#23)',
+  ].join('\n');
+  assert.equal(read(dir, 'CHANGES.rst').replace(DATE, 'DATE'), `1.3.0 (DATE)\n------------------\n\n${expected}\n\n${RST_CHANGELOG}`);
+});
+
+test('nests sub-issues under markdown category headings', async () => {
+  const dir = makeRepo({ 'CHANGES.md': '## 1.2.0 (01-06-2026)\n\n- Vorige release (#1)\n' });
+  const { failures } = await runScript(script, { dir, github: subIssueGithub(), pullRequest });
+
+  assert.deepEqual(failures, []);
+  assert.match(read(dir, 'CHANGES.md'), /### ✨ Features\n\n- Nieuwe kaart \(#20\)\n {2}- Kaart legende \(#21\)\n- Exports \(#60\)\n/);
+});
+
+test('lists sub-issues separately when the parent lookup fails', async () => {
+  const dir = makeRepo({ 'CHANGES.txt': RST_CHANGELOG });
+  const { outputs, failures, warnings } = await runScript(script, {
+    dir, github: subIssueGithub({ parentLookupError: 'Resource not accessible' }), pullRequest,
+  });
+
+  assert.deepEqual(failures, []);
+  assert.deepEqual(warnings, ['Could not look up parent issues, listing sub-issues separately: Resource not accessible']);
+  assert.match(outputs.changelog, /🐛 Bugs\n\n- Kaart legende \(#21\)\n- Crash bij login \(#24\)\n/);
+  assert.doesNotMatch(outputs.changelog, /Exports|^ {2}-/m);
+});
+
 test('fails for a PR title that is not "release x.y.z"', async () => {
   const dir = makeRepo({ 'CHANGES.rst': RST_CHANGELOG });
   const { failures } = await runScript(script, {
