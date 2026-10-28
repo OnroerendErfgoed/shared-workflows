@@ -3,7 +3,12 @@ name: Python release
 # Reusable workflow that releases a Python library to the internal package index:
 #  1. builds the sdist and the wheel (python -m build, with the project's own build backend)
 #  2. checks them with twine, and that their version matches the release tag
-#  3. uploads both with `twine upload -r internal`
+#  3. saves both as a workflow artifact
+#  4. uploads both with `twine upload -r internal`
+#
+# For public PyPI, set `upload: false` and publish the artifact from a job in the caller
+# (see templates/python-release-pypi.yml): PyPI's trusted publishing doesn't work from
+# inside a reusable workflow.
 #
 # The index URL and credentials come from the caller's secrets. They are only written to a
 # temporary .pypirc for the upload step, which is removed afterwards, so the build (which runs
@@ -42,6 +47,10 @@ on:
         description: Pass --skip-existing to twine, so a re-run doesn't fail on files that are already uploaded.
         type: boolean
         default: false
+      artifact-name:
+        description: Name of the workflow artifact with the sdist and wheel.
+        type: string
+        default: dist
       timeout-minutes:
         type: number
         default: 15
@@ -57,6 +66,9 @@ on:
       version:
         description: The version that was built.
         value: ${{ jobs.release.outputs.version }}
+      artifact-name:
+        description: Name of the workflow artifact with the sdist and wheel.
+        value: ${{ inputs.artifact-name }}
 
 permissions: {}
 
@@ -137,6 +149,19 @@ jobs:
           fi
           echo "Built version $version" >> "$GITHUB_STEP_SUMMARY"
 
+      # For a publish job in the caller (public PyPI), and to download the files from the run.
+      - name: Save distributions
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-name }}
+          # Only the distributions: `uv build` also writes a .gitignore to the output directory.
+          path: |
+            ${{ runner.temp }}/dist/*.whl
+            ${{ runner.temp }}/dist/*.tar.gz
+          if-no-files-found: error
+          overwrite: true # re-runs
+          retention-days: 7
+
       - name: Upload to the internal index
         if: inputs.upload
         env:
@@ -158,7 +183,7 @@ jobs:
               "$PYPI_URL" "$PYPI_USERNAME" "$PYPI_PASSWORD" > "$PYPIRC"
           )
           # shellcheck disable=SC2086 # SKIP_EXISTING is empty or a single flag
-          twine upload --non-interactive --config-file "$PYPIRC" -r internal $SKIP_EXISTING "$DIST_DIR"/*
+          twine upload --non-interactive --config-file "$PYPIRC" -r internal $SKIP_EXISTING "$DIST_DIR"/*.whl "$DIST_DIR"/*.tar.gz
 
       # Self-hosted runners keep their disk between jobs.
       - name: Clean up
