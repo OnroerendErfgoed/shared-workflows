@@ -2,6 +2,7 @@ name: Self-test
 
 # CI for this repository: lints the workflows, tests the inline scripts, runs
 # python-tests.yml against the fixture app with every installer and all services,
+# builds it with python-release.yml (without upload),
 # and frontend-tests.yml with every package manager.
 
 on:
@@ -112,6 +113,16 @@ jobs:
       db-setup-command: docker exec "$PG_CONTAINER" psql -U postgres -d demo_test -c "create extension if not exists postgis;"
       test-command: SERVICES=postgres,redis,elasticsearch ELASTICSEARCH_VERSION=9.2.1 pytest tests
       coverage: none
+
+  # Library release: build and twine check only; the self-test has no access to the internal index.
+  python-release:
+    uses: $/.github/workflows/python-release.yml
+    permissions:
+      contents: read
+    with:
+      runs-on: ubuntu-latest
+      working-directory: tests/fixtures/python-app
+      upload: false
 
   # Frontend: pnpm via corepack (version from packageManager), with the GitHub Packages registry.
   frontend-pnpm:

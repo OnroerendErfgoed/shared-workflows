@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `python-release.yml`: new reusable workflow that builds a library's sdist and wheel, checks them with twine and against the release tag, and uploads them to the internal index with `twine upload -r internal`. The index URL and credentials are secrets of the caller, written to a temporary `.pypirc` for the upload step only.
+- `self-test.yml`: builds the fixture app with `python-release.yml` (without upload).
+
 ## 1.3.0 (2026-10-28)
 
 - `frontend-tests.yml`: new reusable workflow for frontend tests with pnpm, yarn or npm (corepack), `@OnroerendErfgoed` packages from GitHub Packages, an optional `npm-token` secret for registry.npmjs.org, and optional lint. The registry tokens are only available during the install.

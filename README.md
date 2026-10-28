@@ -8,6 +8,7 @@ Reusable GitHub Actions workflows for the OnroerendErfgoed repositories. A proje
 | [`frontend-tests.yml`](.github/workflows/frontend-tests.yml) | Installs a frontend project with pnpm, yarn or npm (with GitHub Packages), lints and runs the tests | [`templates/frontend-tests.yml`](templates/frontend-tests.yml) |
 | [`changelog-draft.yml`](.github/workflows/changelog-draft.yml) | When a `release x.y.z` PR from `develop` into `main`/`master` is opened: bumps the version and writes the grouped changelog section to the PR branch | [`templates/changelog-draft.yml`](templates/changelog-draft.yml) |
 | [`release-draft.yml`](.github/workflows/release-draft.yml) | When that PR is merged: creates a draft GitHub release from the changelog section | [`templates/release-draft.yml`](templates/release-draft.yml) |
+| [`python-release.yml`](.github/workflows/python-release.yml) | When a release is published: builds the sdist and wheel of a library and uploads them to the internal package index with twine | [`templates/python-release.yml`](templates/python-release.yml) |
 | [`pr-labeler.yml`](.github/workflows/pr-labeler.yml) | Labels a PR based on its branch name | [`templates/pr-labeler.yml`](templates/pr-labeler.yml) |
 
 Call them with the major version tag:
@@ -149,6 +150,41 @@ Runs when a pull request from `develop` (see `source-branch`) into `main`/`maste
 
 Permissions: `contents: write`.
 
+## `python-release.yml`
+
+Builds the sdist and wheel with `python -m build` (so with the project's own build backend, e.g. hatchling), runs `twine check`, and uploads both with `twine upload -r internal`. Meant for the internal libraries (`oe_utils`, `oe_geoutils`, `pyramid_oeauth`, …): the caller triggers it when the draft release from `release-draft.yml` is published.
+
+When it runs for a tag (a `release` event, or started by hand on a tag), the package version must equal the tag without `tag-prefix`, so a release whose `pyproject.toml` wasn't bumped is not uploaded.
+
+The index URL, username and password are secrets of the calling repo (or organization); nothing about the index is in this public repo. Only the upload step gets them: it writes them to a temporary `.pypirc` (mode `600`, in `runner.temp`) as the `internal` repository and passes it with `--config-file`. The file and the built distributions are removed at the end of the job, also when it fails, because self-hosted runners keep their disk. The build itself (and any build hooks) runs without the secrets.
+
+The internal index is only reachable from our network, so the default runner is `self-hosted`.
+
+| Input | Type | Default | Description |
+| --- | --- | --- | --- |
+| `runs-on` | string | `self-hosted` | Runner label, or a JSON list of labels. Must be able to reach the internal index. |
+| `python-version` | string | `3.11` | Python version to build with. |
+| `working-directory` | string | `.` | Directory with the `pyproject.toml`. |
+| `build-command` | string | `""` | Replaces `python -m build`. Must write the sdist and wheel to `$DIST_DIR`. |
+| `tag-prefix` | string | `""` | Prefix of the release tag, e.g. `v`. |
+| `upload` | boolean | `true` | `false` to only build and check, e.g. on pushes to `develop`. |
+| `skip-existing` | boolean | `false` | Pass `--skip-existing` to twine, for re-runs after a partial upload. |
+| `timeout-minutes` | number | `15` | |
+
+| Secret | Required | Description |
+| --- | --- | --- |
+| `pypi-url` | when uploading | Upload URL of the internal index (the `repository` in `.pypirc`). |
+| `pypi-username` | when uploading | |
+| `pypi-password` | when uploading | |
+
+Repos name these secrets differently, so pass them explicitly, e.g. `pypi-password: ${{ secrets.PYPI_INTERNAL_PASSWORD }}`.
+
+| Output | Description |
+| --- | --- |
+| `version` | The version that was built. |
+
+Permissions: `contents: read`.
+
 ## `pr-labeler.yml`
 
 Adds labels to a new PR based on its branch name, with [TimonVS/pr-labeler-action](https://github.com/TimonVS/pr-labeler-action) and the calling repo's `.github/pr-labeler.yml`.
@@ -207,6 +243,7 @@ All third-party actions are pinned to a commit SHA with the version in a comment
 | `scripts` | The inline `github-script` code of the changelog and release workflows, extracted from the workflow files and run against a temporary git repository with a mocked GitHub API |
 | `python-pip-sync`, `python-pip`, `python-uv` | `python-tests.yml` with each installer against [`tests/fixtures/python-app`](tests/fixtures/python-app), a minimal Pyramid app |
 | `python-services` | `python-tests.yml` with PostGIS, Redis and Elasticsearch, a DB setup command, and tests that check each service |
+| `python-release` | `python-release.yml` without upload: builds the fixture app and checks the distributions |
 | `frontend-pnpm`, `frontend-npm`, `frontend-yarn` | `frontend-tests.yml` with each package manager against [`tests/fixtures/frontend-app`](tests/fixtures/frontend-app) and [`tests/fixtures/frontend-yarn`](tests/fixtures/frontend-yarn), with and without GitHub Packages, and with `node-version-file` |
 
 Run the script tests locally (Node 22+, no dependencies):

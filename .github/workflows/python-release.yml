@@ -1,0 +1,169 @@
+name: Python release
+
+# Reusable workflow that releases a Python library to the internal package index:
+#  1. builds the sdist and the wheel (python -m build, with the project's own build backend)
+#  2. checks them with twine, and that their version matches the release tag
+#  3. uploads both with `twine upload -r internal`
+#
+# The index URL and credentials come from the caller's secrets. They are only written to a
+# temporary .pypirc for the upload step, which is removed afterwards, so the build (which runs
+# the project's build hooks) never sees them. Nothing about the index is stored in this repo.
+#
+# The calling job must grant `contents: read`.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label, or a JSON list of labels. Must reach the internal index (self-hosted).
+        type: string
+        default: self-hosted
+      python-version:
+        description: Python version to build with.
+        type: string
+        default: "3.11"
+      working-directory:
+        description: Directory with the pyproject.toml.
+        type: string
+        default: .
+      build-command:
+        description: Custom build command. Must write the sdist and wheel to $DIST_DIR.
+        type: string
+        default: ""
+      tag-prefix:
+        description: Prefix of the release tag, e.g. "v". The rest of the tag must equal the package version.
+        type: string
+        default: ""
+      upload:
+        description: Upload to the internal index. False to only build and check.
+        type: boolean
+        default: true
+      skip-existing:
+        description: Pass --skip-existing to twine, so a re-run doesn't fail on files that are already uploaded.
+        type: boolean
+        default: false
+      timeout-minutes:
+        type: number
+        default: 15
+    secrets:
+      pypi-url:
+        description: Upload URL of the internal index.
+        required: false
+      pypi-username:
+        required: false
+      pypi-password:
+        required: false
+    outputs:
+      version:
+        description: The version that was built.
+        value: ${{ jobs.release.outputs.version }}
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    concurrency:
+      group: python-release-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install build tools
+        env:
+          VENV: ${{ runner.temp }}/release-venv
+        run: |
+          # --clear: on self-hosted runners runner.temp can still hold a venv from an earlier job.
+          python -m venv --clear "$VENV"
+          "$VENV/bin/pip" install --upgrade pip build twine
+          echo "$VENV/bin" >> "$GITHUB_PATH"
+          # The runner context isn't available in job-level env, so DIST_DIR is set here.
+          echo "DIST_DIR=$RUNNER_TEMP/dist" >> "$GITHUB_ENV"
+
+      - name: Build
+        env:
+          BUILD_COMMAND: ${{ inputs.build-command }}
+        run: |
+          rm -rf "$DIST_DIR"
+          if [ -n "$BUILD_COMMAND" ]; then
+            eval "$BUILD_COMMAND"
+          else
+            python -m build --outdir "$DIST_DIR" .
+          fi
+          ls -l "$DIST_DIR"
+
+      - name: Check
+        id: check
+        env:
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+        run: |
+          shopt -s nullglob
+          wheels=("$DIST_DIR"/*.whl)
+          sdists=("$DIST_DIR"/*.tar.gz)
+          if [ "${#wheels[@]}" -ne 1 ] || [ "${#sdists[@]}" -ne 1 ]; then
+            echo "::error::Expected one wheel and one sdist in $DIST_DIR, found ${#wheels[@]} and ${#sdists[@]}"
+            exit 1
+          fi
+          twine check "${wheels[0]}" "${sdists[0]}"
+
+          # Wheel file names are {name}-{version}-..., with "-" escaped in both parts.
+          version=$(basename "${wheels[0]}" | cut -d- -f2)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            expected="${GITHUB_REF_NAME#"$TAG_PREFIX"}"
+            if [ "$version" != "$expected" ]; then
+              echo "::error::Built version $version does not match tag $GITHUB_REF_NAME"
+              exit 1
+            fi
+          else
+            echo "::warning::Not run for a tag ($GITHUB_REF_TYPE $GITHUB_REF_NAME); the version is not checked against a tag."
+          fi
+          echo "Built version $version" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload to the internal index
+        if: inputs.upload
+        env:
+          PYPI_URL: ${{ secrets.pypi-url }}
+          PYPI_USERNAME: ${{ secrets.pypi-username }}
+          PYPI_PASSWORD: ${{ secrets.pypi-password }}
+          PYPIRC: ${{ runner.temp }}/.pypirc
+          SKIP_EXISTING: ${{ inputs.skip-existing && '--skip-existing' || '' }}
+        run: |
+          if [ -z "$PYPI_URL" ] || [ -z "$PYPI_USERNAME" ] || [ -z "$PYPI_PASSWORD" ]; then
+            echo "::error::The secrets pypi-url, pypi-username and pypi-password are required to upload."
+            exit 1
+          fi
+          # Written with the printf builtin, so the values never appear on a command line;
+          # readable by the runner user only.
+          (
+            umask 077
+            printf '[distutils]\nindex-servers =\n    internal\n\n[internal]\nrepository = %s\nusername = %s\npassword = %s\n' \
+              "$PYPI_URL" "$PYPI_USERNAME" "$PYPI_PASSWORD" > "$PYPIRC"
+          )
+          # shellcheck disable=SC2086 # SKIP_EXISTING is empty or a single flag
+          twine upload --non-interactive --config-file "$PYPIRC" -r internal $SKIP_EXISTING "$DIST_DIR"/*
+
+      # Self-hosted runners keep their disk between jobs.
+      - name: Clean up
+        if: always()
+        env:
+          PYPIRC: ${{ runner.temp }}/.pypirc
+          DIST_DIR: ${{ runner.temp }}/dist
+        run: rm -rf "$PYPIRC" "$DIST_DIR"
