@@ -194,7 +194,8 @@ jobs:
               VENV="$PWD/.venv"
               ;;
             pip-sync|pip)
-              python -m venv "$VENV"
+              # --clear: on self-hosted runners runner.temp can still hold a venv from an earlier job.
+              python -m venv --clear "$VENV"
               source "$VENV/bin/activate"
               if [ -n "$INSTALL_COMMAND" ]; then
                 eval "$INSTALL_COMMAND"
