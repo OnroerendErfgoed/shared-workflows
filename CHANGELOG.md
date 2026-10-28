@@ -1,9 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 (2026-10-28)
 
-- `python-release.yml`: new reusable workflow that builds a library's sdist and wheel, checks them with twine and against the release tag, and uploads them to the internal index with `twine upload -r internal`. The index URL and credentials are secrets of the caller, written to a temporary `.pypirc` for the upload step only.
-- `python-release.yml`: saves the sdist and wheel as a workflow artifact (`artifact-name` input and output), so a caller can publish them to public PyPI. Only `*.whl` and `*.tar.gz` are saved and uploaded, so the `.gitignore` that `uv build` writes to the output directory is left out.
+- `python-release.yml`: new reusable workflow that builds a library's sdist and wheel, checks them with twine and against the release tag, saves them as a workflow artifact, and uploads them to the internal index with `twine upload -r internal`. The index URL and credentials are secrets of the caller, written to a temporary `.pypirc` for the upload step only. With `upload: false`, a caller can publish the artifact to public PyPI instead.
 - `templates/python-release-pypi.yml`: caller for public libraries that publishes the artifact to pypi.org with trusted publishing.
 - `self-test.yml`: builds the fixture app with `python-release.yml` (without upload) and checks the artifact.
 
