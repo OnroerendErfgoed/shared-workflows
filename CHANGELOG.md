@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 (2026-10-28)
 
 - `frontend-tests.yml`: new reusable workflow for frontend tests with pnpm, yarn or npm (corepack), `@OnroerendErfgoed` packages from GitHub Packages, an optional `npm-token` secret for registry.npmjs.org, and optional lint. The registry tokens are only available during the install.
 - `self-test.yml`: runs `frontend-tests.yml` with every package manager.
