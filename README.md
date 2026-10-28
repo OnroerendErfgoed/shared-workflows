@@ -5,6 +5,7 @@ Reusable GitHub Actions workflows for the OnroerendErfgoed repositories. A proje
 | Workflow | Does | Caller template |
 | --- | --- | --- |
 | [`python-tests.yml`](.github/workflows/python-tests.yml) | Installs a Python project, starts PostGIS / Redis / Elasticsearch, lints, runs the tests and reports coverage | [`templates/ci.yml`](templates/ci.yml) |
+| [`frontend-tests.yml`](.github/workflows/frontend-tests.yml) | Installs a frontend project with pnpm, yarn or npm (with GitHub Packages), lints and runs the tests | [`templates/frontend-tests.yml`](templates/frontend-tests.yml) |
 | [`changelog-draft.yml`](.github/workflows/changelog-draft.yml) | When a `release x.y.z` PR from `develop` into `main`/`master` is opened: bumps the version and writes the grouped changelog section to the PR branch | [`templates/changelog-draft.yml`](templates/changelog-draft.yml) |
 | [`release-draft.yml`](.github/workflows/release-draft.yml) | When that PR is merged: creates a draft GitHub release from the changelog section | [`templates/release-draft.yml`](templates/release-draft.yml) |
 | [`pr-labeler.yml`](.github/workflows/pr-labeler.yml) | Labels a PR based on its branch name | [`templates/pr-labeler.yml`](templates/pr-labeler.yml) |
@@ -55,6 +56,33 @@ One job per Python version in `python-versions`. Commands run in `working-direct
 | `timeout-minutes` | number | `15` | Per job. |
 
 Permissions: `contents: read`, `pull-requests: write`. Secrets: none.
+
+## `frontend-tests.yml`
+
+Sets up Node.js, enables pnpm or yarn with corepack (the version from `packageManager` in `package.json`, else corepack's default; yarn without `packageManager` is yarn 1), installs the dependencies, and runs the lint and test commands in `working-directory`.
+
+During the install, a temporary user-level `.npmrc` points `@OnroerendErfgoed` at GitHub Packages and holds the registry tokens as `${...}` references to environment variables. It is removed after the install, so the lint and test commands never see the tokens, and the project's own `.npmrc` is left alone. (pnpm does not expand environment variables in auth settings of a project `.npmrc`.)
+
+For projects whose frontend is built through the Python package (a hatch build hook with `pip install -e .`), use `python-tests.yml` with `skip-build-hooks: false` instead.
+
+| Input | Type | Default | Description |
+| --- | --- | --- | --- |
+| `test-command` | string | **required** | Test command, e.g. `pnpm test:unit`. |
+| `runs-on` | string | `self-hosted` | Runner label, or a JSON list of labels. Public repos must use `ubuntu-latest`. |
+| `node-version` | string | `22` | Node.js version. Ignored when `node-version-file` is set. |
+| `node-version-file` | string | `""` | File with the Node.js version (e.g. `frontend/.nvmrc`), relative to the repository root. |
+| `working-directory` | string | `frontend` | Directory with the `package.json`. |
+| `package-manager` | string | `pnpm` | `pnpm`, `yarn` or `npm`. |
+| `install-command` | string | `""` | Replaces the default install: `pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile` or `npm ci`. |
+| `lint-command` | string | `""` | Empty to skip. |
+| `github-packages` | boolean | `true` | Install `@OnroerendErfgoed` packages from GitHub Packages, with the `GITHUB_TOKEN`. |
+| `timeout-minutes` | number | `15` | |
+
+| Secret | Required | Description |
+| --- | --- | --- |
+| `npm-token` | no | Token for registry.npmjs.org, for private packages there. Repos name this secret differently, so pass it explicitly: `npm-token: ${{ secrets.NPM_GOV_FLANDERS }}`. |
+
+Permissions: `contents: read`, `packages: read`.
 
 ## `changelog-draft.yml`
 
@@ -159,6 +187,12 @@ Every release gets an entry in [CHANGELOG.md](CHANGELOG.md).
    git push -f origin v1
    ```
 
+   Both are annotated tags, so they have different hashes; check that they point to the same commit (the `^{}` lines):
+
+   ```bash
+   git ls-remote --tags origin | grep -E 'refs/tags/v1(\.[0-9]+\.[0-9]+)?\^\{\}$'
+   ```
+
    For a new major version, create `v2` the same way, without `-f`.
 
 ## Development
@@ -173,6 +207,7 @@ All third-party actions are pinned to a commit SHA with the version in a comment
 | `scripts` | The inline `github-script` code of the changelog and release workflows, extracted from the workflow files and run against a temporary git repository with a mocked GitHub API |
 | `python-pip-sync`, `python-pip`, `python-uv` | `python-tests.yml` with each installer against [`tests/fixtures/python-app`](tests/fixtures/python-app), a minimal Pyramid app |
 | `python-services` | `python-tests.yml` with PostGIS, Redis and Elasticsearch, a DB setup command, and tests that check each service |
+| `frontend-pnpm`, `frontend-npm`, `frontend-yarn` | `frontend-tests.yml` with each package manager against [`tests/fixtures/frontend-app`](tests/fixtures/frontend-app) and [`tests/fixtures/frontend-yarn`](tests/fixtures/frontend-yarn), with and without GitHub Packages, and with `node-version-file` |
 
 Run the script tests locally (Node 22+, no dependencies):
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- `frontend-tests.yml`: new reusable workflow for frontend tests with pnpm, yarn or npm (corepack), `@OnroerendErfgoed` packages from GitHub Packages, an optional `npm-token` secret for registry.npmjs.org, and optional lint. The registry tokens are only available during the install.
+- `self-test.yml`: runs `frontend-tests.yml` with every package manager.
+- README: the release check compares the commits the tags point to.
+
+## 1.2.0 (2026-10-28)
+
+- `python-tests.yml`: the pip-sync / pip virtualenv is created with `--clear`, so a virtualenv left in `runner.temp` by an earlier job on a self-hosted runner no longer breaks the install.
+
 ## 1.1.0 (2026-10-27)
 
 - `changelog-draft.yml`: sub-issues are listed under their top-level parent issue, in the parent's category. The parent is shown even when it is not part of the release. Issue type `Collection` counts as a feature. `.rst` changelogs get blank lines around the nested lists.
