@@ -8,7 +8,7 @@ Reusable GitHub Actions workflows for the OnroerendErfgoed repositories. A proje
 | [`frontend-tests.yml`](.github/workflows/frontend-tests.yml) | Installs a frontend project with pnpm, yarn or npm (with GitHub Packages), lints and runs the tests | [`templates/frontend-tests.yml`](templates/frontend-tests.yml) |
 | [`changelog-draft.yml`](.github/workflows/changelog-draft.yml) | When a `release x.y.z` PR from `develop` into `main`/`master` is opened: bumps the version and writes the grouped changelog section to the PR branch | [`templates/changelog-draft.yml`](templates/changelog-draft.yml) |
 | [`release-draft.yml`](.github/workflows/release-draft.yml) | When that PR is merged: creates a draft GitHub release from the changelog section | [`templates/release-draft.yml`](templates/release-draft.yml) |
-| [`python-release.yml`](.github/workflows/python-release.yml) | When a release is published: builds the sdist and wheel of a library and uploads them to the internal package index with twine | [`templates/python-release.yml`](templates/python-release.yml) |
+| [`python-release.yml`](.github/workflows/python-release.yml) | When a release is published: builds the sdist and wheel of a library and uploads them to the internal package index with twine, or hands them to a publish job for public PyPI | [`templates/python-release.yml`](templates/python-release.yml), [`templates/python-release-pypi.yml`](templates/python-release-pypi.yml) |
 | [`pr-labeler.yml`](.github/workflows/pr-labeler.yml) | Labels a PR based on its branch name | [`templates/pr-labeler.yml`](templates/pr-labeler.yml) |
 
 Call them with the major version tag:
@@ -152,7 +152,7 @@ Permissions: `contents: write`.
 
 ## `python-release.yml`
 
-Builds the sdist and wheel with `python -m build` (so with the project's own build backend, e.g. hatchling), runs `twine check`, and uploads both with `twine upload -r internal`. Meant for the internal libraries (`oe_utils`, `oe_geoutils`, `pyramid_oeauth`, …): the caller triggers it when the draft release from `release-draft.yml` is published.
+Builds the sdist and wheel with `python -m build` (so with the project's own build backend, e.g. hatchling), runs `twine check`, saves both as a workflow artifact, and uploads them with `twine upload -r internal`. Meant for the internal libraries (`oe_utils`, `oe_geoutils`, `pyramid_oeauth`, …): the caller triggers it when the draft release from `release-draft.yml` is published.
 
 When it runs for a tag (a `release` event, or started by hand on a tag), the package version must equal the tag without `tag-prefix`, so a release whose `pyproject.toml` wasn't bumped is not uploaded.
 
@@ -169,6 +169,7 @@ The internal index is only reachable from our network, so the default runner is 
 | `tag-prefix` | string | `""` | Prefix of the release tag, e.g. `v`. |
 | `upload` | boolean | `true` | `false` to only build and check, e.g. on pushes to `develop`. |
 | `skip-existing` | boolean | `false` | Pass `--skip-existing` to twine, for re-runs after a partial upload. |
+| `artifact-name` | string | `dist` | Name of the workflow artifact with the sdist and wheel (kept 7 days). |
 | `timeout-minutes` | number | `15` | |
 
 | Secret | Required | Description |
@@ -182,8 +183,20 @@ Repos name these secrets differently, so pass them explicitly, e.g. `pypi-passwo
 | Output | Description |
 | --- | --- |
 | `version` | The version that was built. |
+| `artifact-name` | Name of the workflow artifact with the sdist and wheel. |
 
 Permissions: `contents: read`.
+
+### Public PyPI
+
+Public libraries (e.g. `crabpy_pyramid`) are published to pypi.org with [trusted publishing](https://docs.pypi.org/trusted-publishers/), so no PyPI token is stored. PyPI doesn't accept trusted publishing from inside a reusable workflow, so the upload is a job in the caller: [`templates/python-release-pypi.yml`](templates/python-release-pypi.yml) calls `python-release.yml` on `ubuntu-latest` with `upload: false`, and its `publish` job downloads the artifact and uploads it with [pypa/gh-action-pypi-publish](https://github.com/pypa/gh-action-pypi-publish). The publish job only runs for tags.
+
+Setup, once per repo:
+
+1. On pypi.org, under the project's **Manage → Publishing**, add a GitHub trusted publisher: owner `OnroerendErfgoed`, the repository, the caller's workflow file name (e.g. `python-release.yml`, not the shared workflow) and environment `pypi`.
+2. In the repository's **Settings → Environments**, create the `pypi` environment. Required reviewers or a tag rule there limit who can publish.
+
+Public repos must not use the self-hosted runners, and get no internal index secrets.
 
 ## `pr-labeler.yml`
 
@@ -243,7 +256,7 @@ All third-party actions are pinned to a commit SHA with the version in a comment
 | `scripts` | The inline `github-script` code of the changelog and release workflows, extracted from the workflow files and run against a temporary git repository with a mocked GitHub API |
 | `python-pip-sync`, `python-pip`, `python-uv` | `python-tests.yml` with each installer against [`tests/fixtures/python-app`](tests/fixtures/python-app), a minimal Pyramid app |
 | `python-services` | `python-tests.yml` with PostGIS, Redis and Elasticsearch, a DB setup command, and tests that check each service |
-| `python-release` | `python-release.yml` without upload: builds the fixture app and checks the distributions |
+| `python-release`, `python-release-artifact` | `python-release.yml` without upload: builds the fixture app, checks the distributions, and checks that the artifact holds one wheel and one sdist |
 | `frontend-pnpm`, `frontend-npm`, `frontend-yarn` | `frontend-tests.yml` with each package manager against [`tests/fixtures/frontend-app`](tests/fixtures/frontend-app) and [`tests/fixtures/frontend-yarn`](tests/fixtures/frontend-yarn), with and without GitHub Packages, and with `node-version-file` |
 
 Run the script tests locally (Node 22+, no dependencies):
