@@ -170,7 +170,8 @@ jobs:
           PYPI_PASSWORD: ${{ secrets.pypi-password }}
           PYPIRC: ${{ runner.temp }}/.pypirc
           SKIP_EXISTING: ${{ inputs.skip-existing && '--skip-existing' || '' }}
-        run: |
+        # The internal index has no trusted publishing; public PyPI uses it (python-release-pypi.yml).
+        run: | # zizmor: ignore[use-trusted-publishing]
           if [ -z "$PYPI_URL" ] || [ -z "$PYPI_USERNAME" ] || [ -z "$PYPI_PASSWORD" ]; then
             echo "::error::The secrets pypi-url, pypi-username and pypi-password are required to upload."
             exit 1
