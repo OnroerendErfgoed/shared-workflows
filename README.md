@@ -8,6 +8,7 @@ Reusable GitHub Actions workflows for the OnroerendErfgoed repositories. A proje
 | [`changelog-draft.yml`](.github/workflows/changelog-draft.yml) | When a `release x.y.z` PR from `develop` into `main`/`master` is opened: bumps the version and writes the grouped changelog section to the PR branch | [`templates/changelog-draft.yml`](templates/changelog-draft.yml) |
 | [`release-draft.yml`](.github/workflows/release-draft.yml) | When that PR is merged: creates a draft GitHub release from the changelog section | [`templates/release-draft.yml`](templates/release-draft.yml) |
 | [`pr-labeler.yml`](.github/workflows/pr-labeler.yml) | Labels a PR based on its branch name | [`templates/pr-labeler.yml`](templates/pr-labeler.yml) |
+| [`dependency-track.yml`](.github/workflows/dependency-track.yml) | On PRs and nightly: SBOMs to Dependency-Track, a Risicoscore per finding, one issue per vulnerable library, red build from a configurable level | [`templates/dependency-track.yml`](templates/dependency-track.yml) |
 
 Call them with the major version tag:
 
@@ -130,6 +131,48 @@ Adds labels to a new PR based on its branch name, with [TimonVS/pr-labeler-actio
 | `configuration-path` | string | `.github/pr-labeler.yml` | Labeler configuration in the calling repo. |
 
 Permissions: `contents: read`, `pull-requests: write`.
+
+## `dependency-track.yml`
+
+Scans a project's dependencies for known vulnerabilities with Dependency-Track and scores every finding with the OE risk formula. Run it on PRs and nightly (see the template):
+
+1. **SBOMs.** The backend SBOM comes from `uv.lock` (`uv export --no-dev`) when the project has one, otherwise from the pinned requirements file ([cyclonedx-py](https://github.com/CycloneDX/cyclonedx-python)). With `frontend-directory`, [syft](https://github.com/anchore/syft) reads `yarn.lock`; with `frontend-scope: bundle` (default) a production webpack build of a temp copy narrows that to the packages that actually ship (it calls `webpack.config.js` as `({ production: true }, {})`). If that build fails, the full `yarn.lock` SBOM is used, with a warning.
+2. **Upload.** The SBOMs go to `<project>-backend` and `<project>-frontend`, children of `<project>`. The version is `pr-<number>` on pull requests (these versions stay in Dependency-Track), otherwise the version in `pyproject.toml`, marked latest. The job waits for the analysis.
+3. **Risicoscore** per finding: `Impact x (CVSS weight + exploitability + exposure)`, with Impact = max(`icr-b`, `icr-i`, `icr-c`); CVSS weight <4.0: 1, 4.0-6.9: 2, 7.0-8.9: 3, >=9.0: 4 (v4, else v3, else the severity); exploitability CISA KEV: 3, EPSS >= `epss-threshold`: 2, else 1. Levels: Laag-middel <= 20, Hoog 21-35, Kritiek >= 36. The GHSA, PYSEC and CVE records of one issue count once. The job summary lists every finding.
+4. **Issues.** Every library with findings from `ticket-level` gets one issue, listing all its advisories and the versions in use, labelled `ticket-labels`. A hidden marker finds it again: an open issue is updated, never duplicated. An issue closed as *not planned* is left alone (accepted risk). One closed as *completed* is reopened by the nightly run while the library is still vulnerable; PR runs leave it closed.
+5. **Fail** when the highest finding reaches `fail-level`.
+
+There is no API key. The job exchanges its GitHub OIDC token for a short-lived Dependency-Track session ([workload identity federation](https://dependencytrack.github.io/docs/next/guides/administration/configuring-workload-identity-federation/), Dependency-Track 5.2+). Under Administration > Access Management in Dependency-Track, once per instance:
+
+1. **Service account** `github-ci` with the permissions `BOM_UPLOAD`, `PROJECT_CREATION_UPLOAD`, `PORTFOLIO_MANAGEMENT_CREATE` (parent project), `VIEW_PORTFOLIO` and `VIEW_VULNERABILITY` (reading the findings), and no API key.
+2. **Workload identity provider** `github-actions`: type OpenID Connect, issuer `https://token.actions.githubusercontent.com`, audience `https://<dependency-track hostname>`, signing keys discovered from the issuer.
+3. **Two bindings** on `github-ci` for provider `github-actions`, because GitHub uses two subject formats: `repo:OnroerendErfgoed/*`, and `repo:OnroerendErfgoed@1157802/*` for repositories created after 2026-07-15. Both with the condition `claims.repository_owner_id == "1157802"`.
+
+| Input | Type | Default | Description |
+| --- | --- | --- | --- |
+| `icr-b`, `icr-i`, `icr-c` | number | required | ICR3.0 Beschikbaarheid, Integriteit, Confidentialiteit, 1-5. |
+| `exposure` | number | required | 1 = internal and isolated, 2 = reachable internally, 3 = reachable from outside. |
+| `epss-threshold` | string | `0.1` | EPSS score from which a finding counts as exploited in the wild. |
+| `fail-level` | string | `Kritiek` | `Kritiek`, `Hoog` or `none`. |
+| `ticket-level` | string | `Hoog` | `Kritiek`, `Hoog`, `Laag-middel` or `none`. |
+| `ticket-labels` | string | `security,dependencies` | Comma-separated; the first one finds existing issues. |
+| `runs-on` | string | `self-hosted` | Runner label, or a JSON list of labels. Public repos must use `ubuntu-latest`. |
+| `project-name` | string | `""` | Parent project. Defaults to the repository name. |
+| `project-version` | string | `""` | Overrides `pr-<number>` / `pyproject.toml` / branch name. |
+| `backend-directory` | string | `.` | Directory holding `pyproject.toml` and `uv.lock` or the requirements file. |
+| `sbom-source` | string | `auto` | `auto` (`uv.lock` if present, else the requirements file), `uv` or `requirements`. |
+| `requirements-file` | string | `requirements.txt` | Pinned runtime requirements, relative to `backend-directory`. |
+| `frontend-directory` | string | `""` | Directory holding `package.json` and `yarn.lock`; empty for no frontend. |
+| `frontend-scope` | string | `bundle` | `bundle` or `lockfile`. |
+| `node-version` | string | `18` | For the frontend. |
+| `server-hostname` | string | `""` | Falls back to the `DEPENDENCY_TRACK_HOSTNAME` Actions variable (org or repo), then to `test-dependencytrack.onroerenderfgoed.be`. |
+| `workload-identity-provider` | string | `github-actions` | Provider name in Dependency-Track. |
+| `service-account` | string | `github-ci` | Service account in Dependency-Track. |
+| `timeout-minutes` | number | `30` | |
+
+Outputs: `max-risk` (highest Risicoscore, `0` without findings) and `max-level` (`Kritiek`, `Hoog`, `Laag-middel` or `none`).
+
+Permissions: `contents: read`, `id-token: write`, `issues: write`. Secrets: none.
 
 ## Versioning
 

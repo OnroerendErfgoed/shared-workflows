@@ -45,10 +45,16 @@ export const read = (dir, file) => fs.readFileSync(path.join(dir, file), 'utf8')
 // issueNodes describes the sub-issue tree for GraphQL:
 // { id: { number, title, repo?, type?, labels?, parent?: id } }. Issues of the demo repo
 // that are not in it have no parent. parentLookupError makes the parent queries fail.
+// repoIssues are listed by listForRepo calls without a milestone; existingLabels make
+// createLabel answer 422.
 export function mockGithub({
   milestones = [], milestoneIssues = [], mergedPrs = [], issues = {}, releases = [], issueNodes = {}, parentLookupError,
+  repoIssues = [], existingLabels = [],
 } = {}) {
-  const calls = { createRelease: [], updateRelease: [] };
+  const calls = {
+    createRelease: [], updateRelease: [], createIssue: [], updateIssue: [], createComment: [], createLabel: [], listForRepo: [],
+  };
+  let nextIssue = 100;
   const toNode = (id) => {
     const node = issueNodes[id];
     return {
@@ -90,7 +96,27 @@ export function mockGithub({
     rest: {
       issues: {
         listMilestones: async () => milestones,
-        listForRepo: async () => milestoneIssues,
+        listForRepo: async (params) => {
+          calls.listForRepo.push(params);
+          return params && params.milestone !== undefined ? milestoneIssues : repoIssues;
+        },
+        create: async (issue) => {
+          calls.createIssue.push(issue);
+          return { data: { ...issue, number: nextIssue++ } };
+        },
+        update: async (issue) => {
+          calls.updateIssue.push(issue);
+          return { data: issue };
+        },
+        createComment: async (comment) => {
+          calls.createComment.push(comment);
+          return { data: comment };
+        },
+        createLabel: async (label) => {
+          calls.createLabel.push(label);
+          if (existingLabels.includes(label.name)) throw Object.assign(new Error('Validation Failed'), { status: 422 });
+          return { data: label };
+        },
         get: async ({ issue_number }) => {
           if (!issues[issue_number]) throw Object.assign(new Error('Not Found'), { status: 404 });
           return { data: issues[issue_number] };
@@ -117,7 +143,14 @@ export async function runScript(script, { dir, github, pullRequest, env = {} }) 
   const outputs = {};
   const failures = [];
   const warnings = [];
-  const summary = { addHeading: () => summary, addLink: () => summary, addCodeBlock: () => summary, write: async () => {} };
+  const summary = {
+    text: '',
+    addHeading: () => summary,
+    addLink: () => summary,
+    addCodeBlock: () => summary,
+    addRaw: (text) => { summary.text += text; return summary; },
+    write: async () => {},
+  };
   const core = {
     setOutput: (name, value) => { outputs[name] = value; },
     setFailed: (message) => { failures.push(message); },
@@ -140,5 +173,5 @@ export async function runScript(script, { dir, github, pullRequest, env = {} }) 
     process.chdir(previousCwd);
     process.env = previousEnv;
   }
-  return { outputs, failures, warnings };
+  return { outputs, failures, warnings, summary: summary.text };
 }

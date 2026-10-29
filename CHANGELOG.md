@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `dependency-track.yml`: on PRs and nightly, uploads CycloneDX SBOMs of the backend (uv.lock or a requirements file) and optional yarn frontend to Dependency-Track, authenticated with the job's GitHub OIDC token instead of an API key. Scores every finding with the OE Risicoscore (ICR impact x CVSS, KEV/EPSS and exposure), creates or updates one issue per vulnerable library, and fails from a configurable level. Caller template in `templates/dependency-track.yml`.
+
 ## 1.1.0 (2026-10-27)
 
 - `changelog-draft.yml`: sub-issues are listed under their top-level parent issue, in the parent's category. The parent is shown even when it is not part of the release. Issue type `Collection` counts as a feature. `.rst` changelogs get blank lines around the nested lists.
