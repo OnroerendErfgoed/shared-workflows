@@ -623,9 +623,14 @@ jobs:
               return lines.join('\n');
             };
 
-            for (const label of labels) {
+            // Besides ticket-labels, each issue is labelled with the project(s) the library is in
+            // (backend, frontend). Labels are only added to existing issues, never removed, so
+            // labels set by hand stay.
+            const projectsOf = (items) => [...new Set(items.map((f) => f.project))].sort();
+            const colors = { security: 'd73a4a', backend: '1d76db', frontend: '5319e7' };
+            for (const label of [...labels, ...projectsOf(relevant)]) {
               try {
-                await github.rest.issues.createLabel({ owner, repo, name: label, color: label === 'security' ? 'd73a4a' : 'ededed' });
+                await github.rest.issues.createLabel({ owner, repo, name: label, color: colors[label] ?? 'ededed' });
               } catch (e) {
                 if (e.status !== 422) throw e; // 422: the label exists
               }
@@ -633,18 +638,25 @@ jobs:
             const existing = labels.length
               ? await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'all', labels: labels[0], per_page: 100 })
               : [];
+            const addMissingLabels = async (issue, wanted) => {
+              const have = new Set((issue.labels ?? []).map((l) => (typeof l === 'string' ? l : l.name)));
+              const missing = wanted.filter((l) => !have.has(l));
+              if (missing.length) await github.rest.issues.addLabels({ owner, repo, issue_number: issue.number, labels: missing });
+            };
 
             const created = [], updated = [], reopened = [], skipped = [];
             for (const [key, items] of libraries) {
               const count = new Set(items.map((f) => f.ids.join(' '))).size;
               const title = `Update ${items[0].name} (${items[0].level}: ${count} ${count === 1 ? 'advisory' : 'advisories'})`;
               const text = body(key, items);
+              const issueLabels = [...labels, ...projectsOf(items)];
               const matches = existing.filter((i) => !i.pull_request && (i.body ?? '').includes(markerOf(key)));
               const open = matches.find((i) => i.state === 'open');
               if (open) {
                 if (open.body !== text || open.title !== title) {
                   await github.rest.issues.update({ owner, repo, issue_number: open.number, title, body: text });
                 }
+                await addMissingLabels(open, issueLabels);
                 updated.push(open.number);
                 continue;
               }
@@ -657,12 +669,13 @@ jobs:
               }
               if (closed) {
                 await github.rest.issues.update({ owner, repo, issue_number: closed.number, state: 'open', title, body: text });
+                await addMissingLabels(closed, issueLabels);
                 await github.rest.issues.createComment({ owner, repo, issue_number: closed.number,
                   body: `Reopened: still vulnerable on ${process.env.REF_NAME} ([run](${process.env.RUN_URL})).` });
                 reopened.push(closed.number);
                 continue;
               }
-              const { data } = await github.rest.issues.create({ owner, repo, title, body: text, labels });
+              const { data } = await github.rest.issues.create({ owner, repo, title, body: text, labels: issueLabels });
               created.push(data.number);
             }
             core.setOutput('created', created.join(','));

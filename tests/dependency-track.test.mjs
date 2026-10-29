@@ -129,7 +129,8 @@ test('creates one issue per library with all its advisories', async () => {
     'Update jinja2 (Hoog: 1 advisory)',
   ]);
   const requestsIssue = github.calls.createIssue[1];
-  assert.deepEqual(requestsIssue.labels, ['security', 'dependencies']);
+  assert.deepEqual(requestsIssue.labels, ['security', 'dependencies', 'backend']);
+  assert.deepEqual(github.calls.createIssue[0].labels, ['security', 'dependencies', 'frontend']);
   assert.match(requestsIssue.body, /<!-- dependency-track-library: pkg:pypi\/requests -->/);
   assert.match(requestsIssue.body, /\[GHSA-aaaa-bbbb-cccc\]\(https:\/\/github.com\/advisories\/GHSA-aaaa-bbbb-cccc\) = \[CVE-2024-1111\]/);
   assert.match(requestsIssue.body, /GHSA-dddd-eeee-ffff/);
@@ -144,13 +145,42 @@ test('only creates issues from ticket-level', async () => {
 });
 
 test('updates the open issue of a library instead of creating a second one', async () => {
-  const open = { number: 7, state: 'open', title: 'old', body: 'old\n<!-- dependency-track-library: pkg:pypi/requests -->' };
+  const open = {
+    number: 7, state: 'open', title: 'old', body: 'old\n<!-- dependency-track-library: pkg:pypi/requests -->',
+    labels: [{ name: 'security' }, { name: 'dependencies' }, { name: 'wontfix-yet' }],
+  };
   const { github, outputs } = await issues({ repoIssues: [open] });
   assert.equal(github.calls.updateIssue.length, 1);
   assert.equal(github.calls.updateIssue[0].issue_number, 7);
   assert.equal(github.calls.updateIssue[0].title, 'Update requests (Kritiek: 2 advisories)');
+  assert.equal(github.calls.updateIssue[0].labels, undefined); // labels set by hand stay
+  assert.deepEqual(github.calls.addLabels, [{ owner: 'OnroerendErfgoed', repo: 'demo', issue_number: 7, labels: ['backend'] }]);
   assert.ok(!github.calls.createIssue.some((i) => i.title.startsWith('Update requests')));
   assert.equal(outputs.updated, '7');
+});
+
+test('adds no labels an open issue already has', async () => {
+  const open = {
+    number: 7, state: 'open', body: '<!-- dependency-track-library: pkg:pypi/requests -->',
+    labels: [{ name: 'security' }, { name: 'dependencies' }, { name: 'backend' }],
+  };
+  const { github } = await issues({ repoIssues: [open] });
+  assert.deepEqual(github.calls.addLabels, []);
+});
+
+test('labels a library found in the backend and the frontend with both', async () => {
+  const shared = component('lodash', '4.17.20', 'npm');
+  const backend = [finding(shared, { source: 'GITHUB', vulnId: 'GHSA-xxxx-yyyy-zzzz', cvssV3BaseScore: 7.2 })];
+  const frontend = [finding(shared, { source: 'GITHUB', vulnId: 'GHSA-xxxx-yyyy-zzzz', cvssV3BaseScore: 7.2 })];
+  const dir = makeRepo({ 'dt-findings.json': findingsFile(backend, frontend) });
+  await runScript(scoreScript, { dir, github: mockGithub(), env: SCORE_ENV });
+  const github = mockGithub();
+  await runScript(issuesScript, { dir, github, env: ISSUE_ENV });
+  assert.equal(github.calls.createIssue.length, 1);
+  assert.deepEqual(github.calls.createIssue[0].labels, ['security', 'dependencies', 'backend', 'frontend']);
+  assert.match(github.calls.createIssue[0].body, /\| 4\.17\.20 \| backend \|[^\n]*\n\| 4\.17\.20 \| frontend \|/);
+  // The same advisory in both projects counts once. CVSS 7.2 -> 3, no KEV/EPSS -> 1: 5 x 7 = 35.
+  assert.equal(github.calls.createIssue[0].title, 'Update lodash (Hoog: 1 advisory)');
 });
 
 test('leaves an issue closed as not planned alone', async () => {
@@ -173,8 +203,8 @@ test('reopens a completed issue on a scheduled run, but not on a pull request', 
 });
 
 test('accepts labels that already exist', async () => {
-  const { failures, github } = await issues({ existingLabels: ['security', 'dependencies'] });
+  const { failures, github } = await issues({ existingLabels: ['security', 'dependencies', 'backend', 'frontend'] });
   assert.deepEqual(failures, []);
-  assert.equal(github.calls.createLabel.length, 2);
+  assert.deepEqual(github.calls.createLabel.map((l) => l.name), ['security', 'dependencies', 'backend', 'frontend']);
   assert.equal(github.calls.createIssue.length, 3);
 });

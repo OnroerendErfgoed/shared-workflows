@@ -53,6 +53,7 @@ export function mockGithub({
 } = {}) {
   const calls = {
     createRelease: [], updateRelease: [], createIssue: [], updateIssue: [], createComment: [], createLabel: [], listForRepo: [],
+    addLabels: [],
   };
   let nextIssue = 100;
   const toNode = (id) => {
@@ -107,6 +108,10 @@ export function mockGithub({
         update: async (issue) => {
           calls.updateIssue.push(issue);
           return { data: issue };
+        },
+        addLabels: async (params) => {
+          calls.addLabels.push(params);
+          return { data: params.labels.map((name) => ({ name })) };
         },
         createComment: async (comment) => {
           calls.createComment.push(comment);
