@@ -56,7 +56,7 @@ jobs:
         with:
           node-version: 24
 
-      - name: Test the changelog and release scripts
+      - name: Test the changelog, release and Dependency-Track scripts
         run: node --test 'tests/*.test.mjs'
 
   # Library style: Python matrix, pip-sync, orgoro coverage on PRs.

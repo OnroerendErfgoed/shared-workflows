@@ -296,7 +296,7 @@ All third-party actions are pinned to a commit SHA with the version in a comment
 | Job | Checks |
 | --- | --- |
 | `lint` | [actionlint](https://github.com/rhysd/actionlint) (with shellcheck) and [zizmor](https://docs.zizmor.sh/) on `.github/workflows/` and `templates/` |
-| `scripts` | The inline `github-script` code of the changelog and release workflows, extracted from the workflow files and run against a temporary git repository with a mocked GitHub API |
+| `scripts` | The inline `github-script` code of the changelog, release and Dependency-Track workflows, extracted from the workflow files and run against a temporary git repository with a mocked GitHub API |
 | `python-pip-sync`, `python-pip`, `python-uv` | `python-tests.yml` with each installer against [`tests/fixtures/python-app`](tests/fixtures/python-app), a minimal Pyramid app |
 | `python-services` | `python-tests.yml` with PostGIS, Redis and Elasticsearch, a DB setup command, and tests that check each service |
 | `python-es-major` | `python-tests.yml` with `elasticsearch-version: "9"`: the version from the `ES_VERSION_9` variable, or the default `9.2.1` (the org variables aren't shared with this public repo), checked against `$ELASTICSEARCH_VERSION` |

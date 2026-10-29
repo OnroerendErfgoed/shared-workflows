@@ -541,7 +541,7 @@ jobs:
           TICKET_LEVEL: ${{ inputs.ticket-level }}
           TICKET_LABELS: ${{ inputs.ticket-labels }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          REF_NAME: ${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || github.ref_name }}
+          REF_NAME: "${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || github.ref_name }}"
           IS_PR: ${{ github.event_name == 'pull_request' }}
         with:
           script: |
