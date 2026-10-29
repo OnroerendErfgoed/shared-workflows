@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 (2026-10-29)
 
 - `python-tests.yml`: `elasticsearch-version: "8"` or `"9"` uses the version in the `ES_VERSION_8` or `ES_VERSION_9` Actions variable, so the Elasticsearch versions are set once for the organization. Without the variable (e.g. in a public repo it isn't shared with), `8.2.0` / `9.2.1` is used, with a notice in the log. A specific version still works. The version used is available as `$ELASTICSEARCH_VERSION`.
 - `self-test.yml`: tests `elasticsearch-version: "9"`.
