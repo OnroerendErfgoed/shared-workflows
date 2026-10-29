@@ -5,8 +5,10 @@ Reusable GitHub Actions workflows for the OnroerendErfgoed repositories. A proje
 | Workflow | Does | Caller template |
 | --- | --- | --- |
 | [`python-tests.yml`](.github/workflows/python-tests.yml) | Installs a Python project, starts PostGIS / Redis / Elasticsearch, lints, runs the tests and reports coverage | [`templates/ci.yml`](templates/ci.yml) |
+| [`frontend-tests.yml`](.github/workflows/frontend-tests.yml) | Installs a frontend project with pnpm, yarn or npm (with GitHub Packages), lints and runs the tests | [`templates/frontend-tests.yml`](templates/frontend-tests.yml) |
 | [`changelog-draft.yml`](.github/workflows/changelog-draft.yml) | When a `release x.y.z` PR from `develop` into `main`/`master` is opened: bumps the version and writes the grouped changelog section to the PR branch | [`templates/changelog-draft.yml`](templates/changelog-draft.yml) |
 | [`release-draft.yml`](.github/workflows/release-draft.yml) | When that PR is merged: creates a draft GitHub release from the changelog section | [`templates/release-draft.yml`](templates/release-draft.yml) |
+| [`python-release.yml`](.github/workflows/python-release.yml) | When a release is published: builds the sdist and wheel of a library and uploads them to the internal package index with twine, or hands them to a publish job for public PyPI | [`templates/python-release.yml`](templates/python-release.yml), [`templates/python-release-pypi.yml`](templates/python-release-pypi.yml) |
 | [`pr-labeler.yml`](.github/workflows/pr-labeler.yml) | Labels a PR based on its branch name | [`templates/pr-labeler.yml`](templates/pr-labeler.yml) |
 | [`dependency-track.yml`](.github/workflows/dependency-track.yml) | On PRs and nightly: SBOMs to Dependency-Track, a Risicoscore per finding, one issue per vulnerable library, red build from a configurable level | [`templates/dependency-track.yml`](templates/dependency-track.yml) |
 
@@ -47,7 +49,7 @@ One job per Python version in `python-versions`. Commands run in `working-direct
 | `postgres-db` | string | `""` | `POSTGRES_DB`. |
 | `redis` | boolean | `false` | Start Redis on port 6379. |
 | `redis-image` | string | `redis` | |
-| `elasticsearch-version` | string | `""` | Start Elasticsearch (single node, no security) on port 9200, e.g. `9.2.1`. Also sets the sysctl limits it needs. |
+| `elasticsearch-version` | string | `""` | Start Elasticsearch (single node, no security) on port 9200. `8` or `9` for the version in the `ES_VERSION_8` or `ES_VERSION_9` Actions variable (org or repo), with `8.2.0` / `9.2.1` as default when the variable isn't available, or a specific version, e.g. `9.2.1`. The version used is in `$ELASTICSEARCH_VERSION` for the lint, test and DB setup commands. Also sets the sysctl limits it needs. |
 | `elasticsearch-java-opts` | string | `""` | `ES_JAVA_OPTS`. Falls back to the `ES_JAVA_OPTS` Actions variable (org or repo), then to `-Xms128m -Xmx128m`. |
 | `coverage` | string | `orgoro` | `orgoro` (PR comment with thresholds, PRs only), `coveralls` or `none`. |
 | `coverage-file` | string | `coverage.xml` | Coverage XML, relative to `working-directory`. Its absolute path is in `$COVERAGE_XML`. |
@@ -56,6 +58,33 @@ One job per Python version in `python-versions`. Commands run in `working-direct
 | `timeout-minutes` | number | `15` | Per job. |
 
 Permissions: `contents: read`, `pull-requests: write`. Secrets: none.
+
+## `frontend-tests.yml`
+
+Sets up Node.js, enables pnpm or yarn with corepack (the version from `packageManager` in `package.json`, else corepack's default; yarn without `packageManager` is yarn 1), installs the dependencies, and runs the lint and test commands in `working-directory`.
+
+During the install, a temporary user-level `.npmrc` points `@OnroerendErfgoed` at GitHub Packages and holds the registry tokens as `${...}` references to environment variables. It is removed after the install, so the lint and test commands never see the tokens, and the project's own `.npmrc` is left alone. (pnpm does not expand environment variables in auth settings of a project `.npmrc`.)
+
+For projects whose frontend is built through the Python package (a hatch build hook with `pip install -e .`), use `python-tests.yml` with `skip-build-hooks: false` instead.
+
+| Input | Type | Default | Description |
+| --- | --- | --- | --- |
+| `test-command` | string | **required** | Test command, e.g. `pnpm test:unit`. |
+| `runs-on` | string | `self-hosted` | Runner label, or a JSON list of labels. Public repos must use `ubuntu-latest`. |
+| `node-version` | string | `22` | Node.js version. Ignored when `node-version-file` is set. |
+| `node-version-file` | string | `""` | File with the Node.js version (e.g. `frontend/.nvmrc`), relative to the repository root. |
+| `working-directory` | string | `frontend` | Directory with the `package.json`. |
+| `package-manager` | string | `pnpm` | `pnpm`, `yarn` or `npm`. |
+| `install-command` | string | `""` | Replaces the default install: `pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile` or `npm ci`. |
+| `lint-command` | string | `""` | Empty to skip. |
+| `github-packages` | boolean | `true` | Install `@OnroerendErfgoed` packages from GitHub Packages, with the `GITHUB_TOKEN`. |
+| `timeout-minutes` | number | `15` | |
+
+| Secret | Required | Description |
+| --- | --- | --- |
+| `npm-token` | no | Token for registry.npmjs.org, for private packages there. Repos name this secret differently, so pass it explicitly: `npm-token: ${{ secrets.NPM_GOV_FLANDERS }}`. |
+
+Permissions: `contents: read`, `packages: read`.
 
 ## `changelog-draft.yml`
 
@@ -121,6 +150,54 @@ Runs when a pull request from `develop` (see `source-branch`) into `main`/`maste
 | `html_url` | URL of the draft release. |
 
 Permissions: `contents: write`.
+
+## `python-release.yml`
+
+Builds the sdist and wheel with `python -m build` (so with the project's own build backend, e.g. hatchling), runs `twine check`, saves both as a workflow artifact, and uploads them with `twine upload -r internal`. Meant for the internal libraries (`oe_utils`, `oe_geoutils`, `pyramid_oeauth`, …): the caller triggers it when the draft release from `release-draft.yml` is published.
+
+When it runs for a tag (a `release` event, or started by hand on a tag), the package version must equal the tag without `tag-prefix`, so a release whose `pyproject.toml` wasn't bumped is not uploaded.
+
+The index URL, username and password are secrets of the calling repo (or organization); nothing about the index is in this public repo. Only the upload step gets them: it writes them to a temporary `.pypirc` (mode `600`, in `runner.temp`) as the `internal` repository and passes it with `--config-file`. The file and the built distributions are removed at the end of the job, also when it fails, because self-hosted runners keep their disk. The build itself (and any build hooks) runs without the secrets.
+
+The internal index is only reachable from our network, so the default runner is `self-hosted`.
+
+| Input | Type | Default | Description |
+| --- | --- | --- | --- |
+| `runs-on` | string | `self-hosted` | Runner label, or a JSON list of labels. Must be able to reach the internal index. |
+| `python-version` | string | `3.11` | Python version to build with. |
+| `working-directory` | string | `.` | Directory with the `pyproject.toml`. |
+| `build-command` | string | `""` | Replaces `python -m build`. Must write the sdist and wheel to `$DIST_DIR`. |
+| `tag-prefix` | string | `""` | Prefix of the release tag, e.g. `v`. |
+| `upload` | boolean | `true` | `false` to only build and check, e.g. on pushes to `develop`. |
+| `skip-existing` | boolean | `false` | Pass `--skip-existing` to twine, for re-runs after a partial upload. |
+| `artifact-name` | string | `dist` | Name of the workflow artifact with the sdist and wheel (kept 7 days). |
+| `timeout-minutes` | number | `15` | |
+
+| Secret | Required | Description |
+| --- | --- | --- |
+| `pypi-url` | when uploading | Upload URL of the internal index (the `repository` in `.pypirc`). |
+| `pypi-username` | when uploading | |
+| `pypi-password` | when uploading | |
+
+Repos name these secrets differently, so pass them explicitly, e.g. `pypi-password: ${{ secrets.PYPI_INTERNAL_PASSWORD }}`.
+
+| Output | Description |
+| --- | --- |
+| `version` | The version that was built. |
+| `artifact-name` | Name of the workflow artifact with the sdist and wheel. |
+
+Permissions: `contents: read`.
+
+### Public PyPI
+
+Public libraries (e.g. `crabpy_pyramid`) are published to pypi.org with [trusted publishing](https://docs.pypi.org/trusted-publishers/), so no PyPI token is stored. PyPI doesn't accept trusted publishing from inside a reusable workflow, so the upload is a job in the caller: [`templates/python-release-pypi.yml`](templates/python-release-pypi.yml) calls `python-release.yml` on `ubuntu-latest` with `upload: false`, and its `publish` job downloads the artifact and uploads it with [pypa/gh-action-pypi-publish](https://github.com/pypa/gh-action-pypi-publish). The publish job only runs for tags.
+
+Setup, once per repo:
+
+1. On pypi.org, under the project's **Manage → Publishing**, add a GitHub trusted publisher: owner `OnroerendErfgoed`, the repository, the caller's workflow file name (e.g. `python-release.yml`, not the shared workflow) and environment `pypi`.
+2. In the repository's **Settings → Environments**, create the `pypi` environment. Required reviewers or a tag rule there limit who can publish.
+
+Public repos must not use the self-hosted runners, and get no internal index secrets.
 
 ## `pr-labeler.yml`
 
@@ -202,6 +279,12 @@ Every release gets an entry in [CHANGELOG.md](CHANGELOG.md).
    git push -f origin v1
    ```
 
+   Both are annotated tags, so they have different hashes; check that they point to the same commit (the `^{}` lines):
+
+   ```bash
+   git ls-remote --tags origin | grep -E 'refs/tags/v1(\.[0-9]+\.[0-9]+)?\^\{\}$'
+   ```
+
    For a new major version, create `v2` the same way, without `-f`.
 
 ## Development
@@ -216,6 +299,9 @@ All third-party actions are pinned to a commit SHA with the version in a comment
 | `scripts` | The inline `github-script` code of the changelog and release workflows, extracted from the workflow files and run against a temporary git repository with a mocked GitHub API |
 | `python-pip-sync`, `python-pip`, `python-uv` | `python-tests.yml` with each installer against [`tests/fixtures/python-app`](tests/fixtures/python-app), a minimal Pyramid app |
 | `python-services` | `python-tests.yml` with PostGIS, Redis and Elasticsearch, a DB setup command, and tests that check each service |
+| `python-es-major` | `python-tests.yml` with `elasticsearch-version: "9"`: the version from the `ES_VERSION_9` variable, or the default `9.2.1` (the org variables aren't shared with this public repo), checked against `$ELASTICSEARCH_VERSION` |
+| `python-release`, `python-release-artifact` | `python-release.yml` without upload: builds the fixture app, checks the distributions, and checks that the artifact holds one wheel and one sdist |
+| `frontend-pnpm`, `frontend-npm`, `frontend-yarn` | `frontend-tests.yml` with each package manager against [`tests/fixtures/frontend-app`](tests/fixtures/frontend-app) and [`tests/fixtures/frontend-yarn`](tests/fixtures/frontend-yarn), with and without GitHub Packages, and with `node-version-file` |
 
 Run the script tests locally (Node 22+, no dependencies):
 

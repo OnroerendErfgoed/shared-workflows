@@ -1,0 +1,24 @@
+# Caller for the shared Python release. Copy to .github/workflows/ in a library repo.
+#
+# When the draft release x.y.z (from release-draft.yml) is published, the sdist and wheel
+# are built and uploaded to the internal package index. Can also be started by hand for a tag.
+name: Python release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  release:
+    uses: OnroerendErfgoed/shared-workflows/.github/workflows/python-release.yml@v1
+    permissions:
+      contents: read
+    with:
+      python-version: "3.11"
+    secrets:
+      pypi-url: ${{ secrets.PYPI_INTERNAL_URL }}
+      pypi-username: ${{ secrets.PYPI_INTERNAL_USERNAME }}
+      pypi-password: ${{ secrets.PYPI_INTERNAL_PASSWORD }}

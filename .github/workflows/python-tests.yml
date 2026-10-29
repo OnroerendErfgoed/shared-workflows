@@ -74,7 +74,9 @@ on:
         type: string
         default: redis
       elasticsearch-version:
-        description: Start Elasticsearch with this version on port 9200 (e.g. 9.2.1). Empty for no Elasticsearch.
+        description: >-
+          Start Elasticsearch on port 9200. "8" or "9" for the version in the ES_VERSION_8 or ES_VERSION_9
+          variable (default 8.2.0 / 9.2.1), or a specific version (e.g. 9.2.1). Empty for no Elasticsearch.
         type: string
         default: ""
       elasticsearch-java-opts:
@@ -122,6 +124,8 @@ jobs:
 
     # A service with an empty image is not started.
     # The images are chosen by the caller (tag, or tag@sha256:digest), so they are not pinned here.
+    # The Elasticsearch version expression is repeated in the "Elasticsearch version" step: services
+    # can't use env. "8"/"9" become the ES_VERSION_8/ES_VERSION_9 variable, or 8.2.0/9.2.1 without it.
     services:
       redis:
         image: ${{ inputs.redis && inputs.redis-image || '' }} # zizmor: ignore[unpinned-images]
@@ -138,7 +142,11 @@ jobs:
           POSTGRES_HOST_AUTH_METHOD: trust
         options: --health-cmd "pg_isready -U postgres" --health-interval 10s --health-timeout 5s --health-retries 5
       elasticsearch:
-        image: ${{ inputs.elasticsearch-version && format('docker.elastic.co/elasticsearch/elasticsearch:{0}', inputs.elasticsearch-version) || '' }} # zizmor: ignore[unpinned-images]
+        image: >- # zizmor: ignore[unpinned-images]
+          ${{ inputs.elasticsearch-version && format('docker.elastic.co/elasticsearch/elasticsearch:{0}',
+          (inputs.elasticsearch-version == '8' && (vars.ES_VERSION_8 || '8.2.0'))
+          || (inputs.elasticsearch-version == '9' && (vars.ES_VERSION_9 || '9.2.1'))
+          || inputs.elasticsearch-version) || '' }}
         ports:
           - 9200:9200
         env:
@@ -162,6 +170,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Elasticsearch version
+        if: inputs.elasticsearch-version != ''
+        env:
+          REQUESTED: ${{ inputs.elasticsearch-version }}
+          VARIABLE: ${{ (inputs.elasticsearch-version == '8' && vars.ES_VERSION_8) || (inputs.elasticsearch-version == '9' && vars.ES_VERSION_9) || '' }}
+          RESOLVED: >-
+            ${{ (inputs.elasticsearch-version == '8' && (vars.ES_VERSION_8 || '8.2.0'))
+            || (inputs.elasticsearch-version == '9' && (vars.ES_VERSION_9 || '9.2.1'))
+            || inputs.elasticsearch-version }}
+        run: |
+          if [[ "$REQUESTED" =~ ^[89]$ && -z "$VARIABLE" ]]; then
+            echo "::notice::ES_VERSION_$REQUESTED is not set (or not shared with this repository); using the default $RESOLVED."
+          fi
+          echo "Elasticsearch $RESOLVED"
+          echo "ELASTICSEARCH_VERSION=$RESOLVED" >> "$GITHUB_ENV"
 
       - name: Configure sysctl limits for Elasticsearch
         if: inputs.elasticsearch-version != ''
@@ -194,7 +218,8 @@ jobs:
               VENV="$PWD/.venv"
               ;;
             pip-sync|pip)
-              python -m venv "$VENV"
+              # --clear: on self-hosted runners runner.temp can still hold a venv from an earlier job.
+              python -m venv --clear "$VENV"
               source "$VENV/bin/activate"
               if [ -n "$INSTALL_COMMAND" ]; then
                 eval "$INSTALL_COMMAND"

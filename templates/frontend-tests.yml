@@ -1,0 +1,28 @@
+# Caller for the shared frontend tests. Copy to .github/workflows/ in a project repo.
+# Keep the triggers and paths filters the repo had before.
+name: Frontend tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - frontend/**
+      - .github/workflows/frontend.yaml
+
+permissions: {}
+
+jobs:
+  test:
+    name: Frontend unit tests
+    uses: OnroerendErfgoed/shared-workflows/.github/workflows/frontend-tests.yml@v1
+    permissions:
+      contents: read
+      packages: read # @OnroerendErfgoed packages on GitHub Packages
+    with:
+      node-version: "22"
+      working-directory: frontend
+      package-manager: pnpm # or yarn / npm
+      test-command: pnpm test:unit
+      # lint-command: pnpm lint
+    secrets:
+      npm-token: ${{ secrets.NPM_GOV_FLANDERS }} # only for private packages on registry.npmjs.org

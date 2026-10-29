@@ -1,0 +1,142 @@
+name: Frontend tests
+
+# Reusable workflow: installs a frontend project's dependencies with pnpm, yarn or npm,
+# then runs the lint and test commands.
+#
+# Triggers (and their `paths:` filters) stay in the calling workflow.
+# The calling job must grant `contents: read` and `packages: read`.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label, or a JSON list of labels (e.g. '["self-hosted", "linux"]').
+        type: string
+        default: self-hosted
+      node-version:
+        description: Node.js version. Ignored when node-version-file is set.
+        type: string
+        default: "22"
+      node-version-file:
+        description: File with the Node.js version (e.g. frontend/.nvmrc), relative to the repository root.
+        type: string
+        default: ""
+      working-directory:
+        description: Directory with the package.json; the install, lint and test commands run there.
+        type: string
+        default: frontend
+      package-manager:
+        description: "pnpm, yarn or npm. pnpm and yarn are enabled with corepack (version from packageManager in package.json)."
+        type: string
+        default: pnpm
+      install-command:
+        description: "Custom install command. Default: pnpm install --frozen-lockfile, yarn install --frozen-lockfile or npm ci."
+        type: string
+        default: ""
+      lint-command:
+        description: Lint command. Empty to skip.
+        type: string
+        default: ""
+      test-command:
+        description: Test command, e.g. pnpm test:unit.
+        type: string
+        required: true
+      github-packages:
+        description: Install @OnroerendErfgoed packages from GitHub Packages.
+        type: boolean
+        default: true
+      timeout-minutes:
+        type: number
+        default: 15
+    secrets:
+      npm-token:
+        description: Token for registry.npmjs.org, for private packages there (e.g. @govflanders).
+        required: false
+
+permissions: {}
+
+jobs:
+  test:
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      packages: read # @OnroerendErfgoed packages on GitHub Packages
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+
+    env:
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.node-version-file == '' && inputs.node-version || '' }}
+          node-version-file: ${{ inputs.node-version-file }}
+
+      - name: Enable ${{ inputs.package-manager }}
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+        run: |
+          case "$PACKAGE_MANAGER" in
+            pnpm|yarn) corepack enable "$PACKAGE_MANAGER" ;;
+            npm) ;;
+            *)
+              echo "::error::Unknown package-manager '$PACKAGE_MANAGER' (expected pnpm, yarn or npm)"
+              exit 1
+              ;;
+          esac
+          "$PACKAGE_MANAGER" --version
+
+      # The registry settings go in a user-level .npmrc that only exists during this step.
+      # It refers to the tokens as ${...}, which the package managers expand from the
+      # environment (pnpm does not expand them in the project's .npmrc). It also hides
+      # the runner's own ~/.npmrc.
+      - name: Install
+        env:
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+          INSTALL_COMMAND: ${{ inputs.install-command }}
+          GITHUB_PACKAGES: ${{ inputs.github-packages }}
+          GITHUB_PACKAGES_TOKEN: ${{ github.token }}
+          NPM_TOKEN: ${{ secrets.npm-token }}
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/npmrc
+        run: |
+          trap 'rm -f "$NPM_CONFIG_USERCONFIG"' EXIT
+          : > "$NPM_CONFIG_USERCONFIG"
+          # shellcheck disable=SC2016
+          if [ "$GITHUB_PACKAGES" = true ]; then
+            echo '@OnroerendErfgoed:registry=https://npm.pkg.github.com' >> "$NPM_CONFIG_USERCONFIG"
+            echo '//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}' >> "$NPM_CONFIG_USERCONFIG"
+          fi
+          # shellcheck disable=SC2016
+          if [ -n "$NPM_TOKEN" ]; then
+            echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' >> "$NPM_CONFIG_USERCONFIG"
+          fi
+
+          if [ -n "$INSTALL_COMMAND" ]; then
+            eval "$INSTALL_COMMAND"
+          else
+            case "$PACKAGE_MANAGER" in
+              pnpm) pnpm install --frozen-lockfile ;;
+              yarn) yarn install --frozen-lockfile ;;
+              npm) npm ci ;;
+            esac
+          fi
+
+      - name: Lint
+        if: inputs.lint-command != ''
+        env:
+          LINT_COMMAND: ${{ inputs.lint-command }}
+        run: eval "$LINT_COMMAND"
+
+      - name: Test
+        env:
+          TEST_COMMAND: ${{ inputs.test-command }}
+        run: eval "$TEST_COMMAND"

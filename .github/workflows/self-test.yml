@@ -1,7 +1,9 @@
 name: Self-test
 
-# CI for this repository: lints the workflows, tests the inline scripts, and runs
-# python-tests.yml against the fixture app with every installer and all services.
+# CI for this repository: lints the workflows, tests the inline scripts, runs
+# python-tests.yml against the fixture app with every installer and all services,
+# builds it with python-release.yml (without upload) and checks the artifact,
+# and frontend-tests.yml with every package manager.
 
 on:
   pull_request:
@@ -111,3 +113,87 @@ jobs:
       db-setup-command: docker exec "$PG_CONTAINER" psql -U postgres -d demo_test -c "create extension if not exists postgis;"
       test-command: SERVICES=postgres,redis,elasticsearch ELASTICSEARCH_VERSION=9.2.1 pytest tests
       coverage: none
+
+  # Elasticsearch by major version: the org's ES_VERSION_9 variable isn't shared with this
+  # public repo, so this runs the default (9.2.1),
+  # and the test checks the server against the $ELASTICSEARCH_VERSION that was set.
+  python-es-major:
+    uses: $/.github/workflows/python-tests.yml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      runs-on: ubuntu-latest
+      working-directory: tests/fixtures/python-app
+      elasticsearch-version: "9"
+      test-command: SERVICES=elasticsearch pytest tests
+      coverage: none
+
+  # Library release: build and twine check only; the self-test has no access to the internal index.
+  python-release:
+    uses: $/.github/workflows/python-release.yml
+    permissions:
+      contents: read
+    with:
+      runs-on: ubuntu-latest
+      working-directory: tests/fixtures/python-app
+      upload: false
+
+  # What a public PyPI publish job gets (templates/python-release-pypi.yml).
+  python-release-artifact:
+    needs: python-release
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.python-release.outputs.artifact-name }}
+          path: dist/
+
+      - name: Check the artifact
+        env:
+          VERSION: ${{ needs.python-release.outputs.version }}
+        run: |
+          ls -l dist
+          test "$VERSION" = 0.1.0
+          test -f "dist/demo_app-$VERSION-py3-none-any.whl"
+          test -f "dist/demo_app-$VERSION.tar.gz"
+          test "$(find dist -type f | wc -l)" -eq 2
+
+  # Frontend: pnpm via corepack (version from packageManager), with the GitHub Packages registry.
+  frontend-pnpm:
+    uses: $/.github/workflows/frontend-tests.yml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      runs-on: ubuntu-latest
+      working-directory: tests/fixtures/frontend-app
+      lint-command: pnpm lint
+      test-command: pnpm test:unit
+
+  frontend-npm:
+    uses: $/.github/workflows/frontend-tests.yml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      runs-on: ubuntu-latest
+      node-version: "24"
+      working-directory: tests/fixtures/frontend-app
+      package-manager: npm
+      github-packages: false
+      test-command: npm run test:unit
+
+  # Yarn classic via corepack, Node.js version from a file.
+  frontend-yarn:
+    uses: $/.github/workflows/frontend-tests.yml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      runs-on: ubuntu-latest
+      node-version-file: tests/fixtures/frontend-yarn/.nvmrc
+      working-directory: tests/fixtures/frontend-yarn
+      package-manager: yarn
+      test-command: yarn build && yarn test

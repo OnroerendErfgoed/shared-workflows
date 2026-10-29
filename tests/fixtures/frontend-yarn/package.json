@@ -1,0 +1,10 @@
+{
+  "name": "demo-frontend-yarn",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node --check src/greet.js",
+    "test": "node --test"
+  }
+}
