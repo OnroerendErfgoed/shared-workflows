@@ -29,7 +29,7 @@ jobs:
       postgres: true
       postgres-db: myapp_test
       redis: true
-      elasticsearch-version: "9.2.1"
+      elasticsearch-version: "9" # ES_VERSION_9 variable; or "8", or a specific version like "9.2.1"
       db-setup-command: scripts/reset_db_test.sh "$PG_CONTAINER"
       test-command: pytest backend/tests --cov=myapp --cov-report=xml:"$COVERAGE_XML"
 
