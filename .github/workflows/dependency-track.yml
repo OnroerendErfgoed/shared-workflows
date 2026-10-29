@@ -15,7 +15,8 @@ name: Dependency-Track
 # (workload identity federation, Dependency-Track 5.2+); see the README for the server setup.
 #
 # Triggers stay in the calling workflow.
-# The calling job must grant `contents: read`, `id-token: write` and `issues: write`.
+# The calling job must grant `contents: read`, `id-token: write`, `issues: write` and
+# `packages: read`.
 
 on:
   workflow_call:
@@ -88,6 +89,10 @@ on:
         description: Node.js version for the frontend.
         type: string
         default: "18"
+      github-packages:
+        description: Install @OnroerendErfgoed frontend packages from GitHub Packages.
+        type: boolean
+        default: true
       server-hostname:
         description: Dependency-Track hostname. Falls back to the DEPENDENCY_TRACK_HOSTNAME variable, then to the test instance.
         type: string
@@ -121,6 +126,7 @@ jobs:
       contents: read
       id-token: write # GitHub OIDC token, exchanged for a Dependency-Track session
       issues: write # one issue per vulnerable library
+      packages: read # @OnroerendErfgoed frontend packages on GitHub Packages
     outputs:
       max-risk: ${{ steps.score.outputs.max-risk }}
       max-level: ${{ steps.score.outputs.max-level }}
@@ -193,10 +199,25 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
+      # As in frontend-tests.yml: the registry settings go in a user-level .npmrc that only
+      # exists during this step and refers to the token as ${...}, which yarn expands from the
+      # environment. It also hides the runner's own ~/.npmrc.
       - name: Install frontend dependencies
         if: inputs.frontend-directory != ''
         working-directory: ${{ inputs.frontend-directory }}
-        run: npx --yes yarn@1 install --frozen-lockfile --non-interactive
+        env:
+          GITHUB_PACKAGES: ${{ inputs.github-packages }}
+          GITHUB_PACKAGES_TOKEN: ${{ github.token }}
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/npmrc
+        run: |
+          trap 'rm -f "$NPM_CONFIG_USERCONFIG"' EXIT
+          : > "$NPM_CONFIG_USERCONFIG"
+          # shellcheck disable=SC2016
+          if [ "$GITHUB_PACKAGES" = true ]; then
+            echo '@OnroerendErfgoed:registry=https://npm.pkg.github.com' >> "$NPM_CONFIG_USERCONFIG"
+            echo '//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}' >> "$NPM_CONFIG_USERCONFIG"
+          fi
+          npx --yes yarn@1 install --frozen-lockfile --non-interactive
 
       - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         if: inputs.frontend-directory != ''

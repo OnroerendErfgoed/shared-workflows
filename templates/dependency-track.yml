@@ -26,6 +26,7 @@ jobs:
       contents: read
       id-token: write
       issues: write
+      packages: read
     with:
       icr-b: 3 # ICR3.0 Beschikbaarheid 1-5
       icr-i: 3 # ICR3.0 Integriteit 1-5

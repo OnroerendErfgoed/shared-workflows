@@ -242,6 +242,7 @@ There is no API key. The job exchanges its GitHub OIDC token for a short-lived D
 | `frontend-directory` | string | `""` | Directory holding `package.json` and `yarn.lock`; empty for no frontend. |
 | `frontend-scope` | string | `bundle` | `bundle` or `lockfile`. |
 | `node-version` | string | `18` | For the frontend. |
+| `github-packages` | boolean | `true` | Install `@OnroerendErfgoed` frontend packages from GitHub Packages, with the job's token. |
 | `server-hostname` | string | `""` | Falls back to the `DEPENDENCY_TRACK_HOSTNAME` Actions variable (org or repo), then to `test-dependencytrack.onroerenderfgoed.be`. |
 | `workload-identity-provider` | string | `github-actions` | Provider name in Dependency-Track. |
 | `service-account` | string | `github-ci` | Service account in Dependency-Track. |
@@ -249,7 +250,7 @@ There is no API key. The job exchanges its GitHub OIDC token for a short-lived D
 
 Outputs: `max-risk` (highest Risicoscore, `0` without findings) and `max-level` (`Kritiek`, `Hoog`, `Laag-middel` or `none`).
 
-Permissions: `contents: read`, `id-token: write`, `issues: write`. Secrets: none.
+Permissions: `contents: read`, `id-token: write`, `issues: write`, `packages: read`. Secrets: none.
 
 ## Versioning
 
