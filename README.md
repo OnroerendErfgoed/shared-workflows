@@ -48,7 +48,7 @@ One job per Python version in `python-versions`. Commands run in `working-direct
 | `postgres-db` | string | `""` | `POSTGRES_DB`. |
 | `redis` | boolean | `false` | Start Redis on port 6379. |
 | `redis-image` | string | `redis` | |
-| `elasticsearch-version` | string | `""` | Start Elasticsearch (single node, no security) on port 9200. `8` or `9` for the version in the `ES_VERSION_8` or `ES_VERSION_9` Actions variable (org or repo), or a specific version, e.g. `9.2.1`. The version used is in `$ELASTICSEARCH_VERSION` for the lint, test and DB setup commands. Also sets the sysctl limits it needs. |
+| `elasticsearch-version` | string | `""` | Start Elasticsearch (single node, no security) on port 9200. `8` or `9` for the version in the `ES_VERSION_8` or `ES_VERSION_9` Actions variable (org or repo), with `8.2.0` / `9.2.1` as default when the variable isn't available, or a specific version, e.g. `9.2.1`. The version used is in `$ELASTICSEARCH_VERSION` for the lint, test and DB setup commands. Also sets the sysctl limits it needs. |
 | `elasticsearch-java-opts` | string | `""` | `ES_JAVA_OPTS`. Falls back to the `ES_JAVA_OPTS` Actions variable (org or repo), then to `-Xms128m -Xmx128m`. |
 | `coverage` | string | `orgoro` | `orgoro` (PR comment with thresholds, PRs only), `coveralls` or `none`. |
 | `coverage-file` | string | `coverage.xml` | Coverage XML, relative to `working-directory`. Its absolute path is in `$COVERAGE_XML`. |
@@ -256,7 +256,7 @@ All third-party actions are pinned to a commit SHA with the version in a comment
 | `scripts` | The inline `github-script` code of the changelog and release workflows, extracted from the workflow files and run against a temporary git repository with a mocked GitHub API |
 | `python-pip-sync`, `python-pip`, `python-uv` | `python-tests.yml` with each installer against [`tests/fixtures/python-app`](tests/fixtures/python-app), a minimal Pyramid app |
 | `python-services` | `python-tests.yml` with PostGIS, Redis and Elasticsearch, a DB setup command, and tests that check each service |
-| `python-es-major` | `python-tests.yml` with `elasticsearch-version: "9"`: the version from the `ES_VERSION_9` variable, checked against `$ELASTICSEARCH_VERSION` |
+| `python-es-major` | `python-tests.yml` with `elasticsearch-version: "9"`: the version from the `ES_VERSION_9` variable, or the default `9.2.1` (the org variables aren't shared with this public repo), checked against `$ELASTICSEARCH_VERSION` |
 | `python-release`, `python-release-artifact` | `python-release.yml` without upload: builds the fixture app, checks the distributions, and checks that the artifact holds one wheel and one sdist |
 | `frontend-pnpm`, `frontend-npm`, `frontend-yarn` | `frontend-tests.yml` with each package manager against [`tests/fixtures/frontend-app`](tests/fixtures/frontend-app) and [`tests/fixtures/frontend-yarn`](tests/fixtures/frontend-yarn), with and without GitHub Packages, and with `node-version-file` |
 

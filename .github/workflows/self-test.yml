@@ -114,7 +114,8 @@ jobs:
       test-command: SERVICES=postgres,redis,elasticsearch ELASTICSEARCH_VERSION=9.2.1 pytest tests
       coverage: none
 
-  # Elasticsearch by major version: the version comes from the ES_VERSION_9 variable,
+  # Elasticsearch by major version: the org's ES_VERSION_9 variable isn't shared with this
+  # public repo, so this runs the default (9.2.1),
   # and the test checks the server against the $ELASTICSEARCH_VERSION that was set.
   python-es-major:
     uses: $/.github/workflows/python-tests.yml
