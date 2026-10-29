@@ -114,6 +114,20 @@ jobs:
       test-command: SERVICES=postgres,redis,elasticsearch ELASTICSEARCH_VERSION=9.2.1 pytest tests
       coverage: none
 
+  # Elasticsearch by major version: the version comes from the ES_VERSION_9 variable,
+  # and the test checks the server against the $ELASTICSEARCH_VERSION that was set.
+  python-es-major:
+    uses: $/.github/workflows/python-tests.yml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      runs-on: ubuntu-latest
+      working-directory: tests/fixtures/python-app
+      elasticsearch-version: "9"
+      test-command: SERVICES=elasticsearch pytest tests
+      coverage: none
+
   # Library release: build and twine check only; the self-test has no access to the internal index.
   python-release:
     uses: $/.github/workflows/python-release.yml

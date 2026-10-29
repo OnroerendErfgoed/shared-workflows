@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `python-tests.yml`: `elasticsearch-version: "8"` or `"9"` uses the version in the `ES_VERSION_8` or `ES_VERSION_9` Actions variable, so the Elasticsearch versions are set once for the organization. A specific version still works. When the variable is missing, Elasticsearch isn't started and the job fails with a clear error. The version used is available as `$ELASTICSEARCH_VERSION`.
+- `self-test.yml`: tests `elasticsearch-version: "9"`.
+- `templates/ci.yml`: uses `elasticsearch-version: "9"`.
+
 ## 1.4.0 (2026-10-28)
 
 - `python-release.yml`: new reusable workflow that builds a library's sdist and wheel, checks them with twine and against the release tag, saves them as a workflow artifact, and uploads them to the internal index with `twine upload -r internal`. The index URL and credentials are secrets of the caller, written to a temporary `.pypirc` for the upload step only. With `upload: false`, a caller can publish the artifact to public PyPI instead.
