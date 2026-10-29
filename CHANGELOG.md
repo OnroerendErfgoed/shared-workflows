@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `dependency-track.yml`: on PRs and nightly, uploads CycloneDX SBOMs of the backend (uv.lock or a requirements file) and optional yarn frontend to Dependency-Track, authenticated with the job's GitHub OIDC token instead of an API key. Scores every finding with the OE Risicoscore (ICR impact x CVSS, KEV/EPSS and exposure), creates or updates one issue per vulnerable library, and fails from a configurable level. Caller template in `templates/dependency-track.yml`.
+
 ## 1.5.0 (2026-10-29)
 
 - `python-tests.yml`: `elasticsearch-version: "8"` or `"9"` uses the version in the `ES_VERSION_8` or `ES_VERSION_9` Actions variable, so the Elasticsearch versions are set once for the organization. Without the variable (e.g. in a public repo it isn't shared with), `8.2.0` / `9.2.1` is used, with a notice in the log. A specific version still works. The version used is available as `$ELASTICSEARCH_VERSION`.

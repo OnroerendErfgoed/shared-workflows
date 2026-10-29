@@ -1,0 +1,715 @@
+name: Dependency-Track
+
+# Reusable workflow: generates CycloneDX SBOMs of a project's backend (Python) and optional
+# frontend (yarn), uploads them to Dependency-Track and scores every finding with the OE
+# risk formula:
+#
+#   Risicoscore = Impact x (CVSS weight + Exploitability + Exposure)
+#   Impact = max(ICR B, I, C)   Laag-middel <= 20, Hoog 21-35, Kritiek >= 36
+#
+# Run it on pull requests (version: the PR's source branch) and on a schedule on main/master
+# (version: the app version in pyproject.toml, marked latest). Both create or update one
+# GitHub issue per vulnerable library, and fail the job when a finding reaches fail-level.
+#
+# No API key: the job exchanges its GitHub OIDC token for a short-lived Dependency-Track session
+# (workload identity federation, Dependency-Track 5.2+); see the README for the server setup.
+#
+# Triggers stay in the calling workflow.
+# The calling job must grant `contents: read`, `id-token: write`, `issues: write` and
+# `packages: read`.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label, or a JSON list of labels (e.g. '["self-hosted", "linux"]').
+        type: string
+        default: self-hosted
+      icr-b:
+        description: ICR3.0 Beschikbaarheid (availability), 1-5.
+        type: number
+        required: true
+      icr-i:
+        description: ICR3.0 Integriteit (integrity), 1-5.
+        type: number
+        required: true
+      icr-c:
+        description: ICR3.0 Confidentialiteit (confidentiality), 1-5.
+        type: number
+        required: true
+      exposure:
+        description: 1 = internal and isolated, 2 = reachable internally, 3 = reachable from outside.
+        type: number
+        required: true
+      epss-threshold:
+        description: EPSS score from which a finding counts as exploited in the wild ("beperkte waarnemingen").
+        type: string
+        default: "0.1"
+      fail-level:
+        description: "Fail the job when a finding reaches this level: Kritiek, Hoog or none."
+        type: string
+        default: Kritiek
+      ticket-level:
+        description: "Create or update an issue per library with findings from this level: Kritiek, Hoog, Laag-middel or none."
+        type: string
+        default: Hoog
+      ticket-labels:
+        description: Comma-separated labels for the issues. The first one is used to find existing issues.
+        type: string
+        default: security,dependencies
+      project-name:
+        description: Parent project in Dependency-Track; the SBOMs go to <name>-backend and <name>-frontend. Defaults to the repository name.
+        type: string
+        default: ""
+      project-version:
+        description: Version in Dependency-Track. Defaults to the source branch on pull requests, the version in pyproject.toml on main/master, else the branch or tag name.
+        type: string
+        default: ""
+      backend-directory:
+        description: Directory holding pyproject.toml and uv.lock or the requirements file.
+        type: string
+        default: .
+      sbom-source:
+        description: "Where the backend SBOM comes from: auto (uv.lock if present, else the requirements file), uv or requirements."
+        type: string
+        default: auto
+      requirements-file:
+        description: Pinned runtime requirements, relative to backend-directory, for sbom-source requirements.
+        type: string
+        default: requirements.txt
+      frontend-directory:
+        description: Directory holding package.json and yarn.lock. Empty for no frontend.
+        type: string
+        default: ""
+      frontend-scope:
+        description: "bundle: only packages that end up in the production webpack build; lockfile: everything in yarn.lock."
+        type: string
+        default: bundle
+      node-version:
+        description: Node.js version for the frontend.
+        type: string
+        default: "18"
+      github-packages:
+        description: Install @OnroerendErfgoed frontend packages from GitHub Packages.
+        type: boolean
+        default: true
+      server-hostname:
+        description: Dependency-Track hostname. Falls back to the DEPENDENCY_TRACK_HOSTNAME variable, then to the test instance.
+        type: string
+        default: ""
+      workload-identity-provider:
+        description: Name of the workload identity provider in Dependency-Track.
+        type: string
+        default: github-actions
+      service-account:
+        description: Dependency-Track service account the job acts as.
+        type: string
+        default: github-ci
+      timeout-minutes:
+        type: number
+        default: 30
+    outputs:
+      max-risk:
+        description: Highest Risicoscore of all findings (0 without findings).
+        value: ${{ jobs.scan.outputs.max-risk }}
+      max-level:
+        description: Level of the highest finding (Kritiek, Hoog, Laag-middel or none).
+        value: ${{ jobs.scan.outputs.max-level }}
+
+permissions: {}
+
+jobs:
+  scan:
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC token, exchanged for a Dependency-Track session
+      issues: write # one issue per vulnerable library
+      packages: read # @OnroerendErfgoed frontend packages on GitHub Packages
+    outputs:
+      max-risk: ${{ steps.score.outputs.max-risk }}
+      max-level: ${{ steps.score.outputs.max-level }}
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      DT_URL: https://${{ inputs.server-hostname || vars.DEPENDENCY_TRACK_HOSTNAME || 'test-dependencytrack.onroerenderfgoed.be' }}
+      PROJECT: ${{ inputs.project-name || github.event.repository.name }}
+      FRONTEND_DIR: ${{ inputs.frontend-directory }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      # On main/master: the app version declared in pyproject.toml, marked latest. On a PR: the
+      # source branch, so every push to the PR updates the same version. Elsewhere: the branch
+      # or tag name.
+      - name: Project version
+        id: version
+        working-directory: ${{ inputs.backend-directory }}
+        env:
+          VERSION: ${{ inputs.project-version }}
+          HEAD_REF: ${{ github.head_ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          latest=false
+          if [ -n "$HEAD_REF" ]; then
+            VERSION="${VERSION:-$HEAD_REF}"
+          elif [ "$REF_NAME" = main ] || [ "$REF_NAME" = master ]; then
+            latest=true
+            if [ -z "$VERSION" ] && [ -f pyproject.toml ]; then
+              VERSION=$(uv run --no-project --quiet python -c '
+          import tomllib
+          d = tomllib.load(open("pyproject.toml", "rb"))
+          print(d.get("project", {}).get("version") or d.get("tool", {}).get("poetry", {}).get("version") or "")')
+            fi
+            if [ -z "$VERSION" ]; then
+              echo "::warning::No version in pyproject.toml; using the branch name"
+            fi
+          fi
+          VERSION="${VERSION:-$REF_NAME}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "Project: $PROJECT $VERSION (latest: $latest)"
+
+      - name: Backend SBOM
+        working-directory: ${{ inputs.backend-directory }}
+        env:
+          SBOM_SOURCE: ${{ inputs.sbom-source }}
+          REQUIREMENTS_FILE: ${{ inputs.requirements-file }}
+          BOM: ${{ runner.temp }}/backend.bom.json
+        run: |
+          if [ "$SBOM_SOURCE" = auto ]; then
+            if [ -f uv.lock ]; then SBOM_SOURCE=uv; else SBOM_SOURCE=requirements; fi
+          fi
+          case "$SBOM_SOURCE" in
+            uv)
+              uv export --format cyclonedx1.5 --frozen --no-dev -o "$BOM"
+              ;;
+            requirements)
+              if [ ! -f "$REQUIREMENTS_FILE" ]; then
+                echo "::error::No uv.lock and no $REQUIREMENTS_FILE in $PWD (set backend-directory or requirements-file)"
+                exit 1
+              fi
+              uvx --from cyclonedx-bom==7.5.0 cyclonedx-py requirements "$REQUIREMENTS_FILE" --of JSON -o "$BOM"
+              ;;
+            *)
+              echo "::error::Unknown sbom-source '$SBOM_SOURCE' (expected auto, uv or requirements)"
+              exit 1
+              ;;
+          esac
+          echo "Backend SBOM from $SBOM_SOURCE: $(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1])).get("components", [])))' "$BOM") components"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: inputs.frontend-directory != ''
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      # As in frontend-tests.yml: the registry settings go in a user-level .npmrc that only
+      # exists during this step and refers to the token as ${...}, which yarn expands from the
+      # environment. It also hides the runner's own ~/.npmrc.
+      - name: Install frontend dependencies
+        if: inputs.frontend-directory != ''
+        working-directory: ${{ inputs.frontend-directory }}
+        env:
+          GITHUB_PACKAGES: ${{ inputs.github-packages }}
+          GITHUB_PACKAGES_TOKEN: ${{ github.token }}
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/npmrc
+        run: |
+          trap 'rm -f "$NPM_CONFIG_USERCONFIG"' EXIT
+          : > "$NPM_CONFIG_USERCONFIG"
+          # shellcheck disable=SC2016
+          if [ "$GITHUB_PACKAGES" = true ]; then
+            echo '@OnroerendErfgoed:registry=https://npm.pkg.github.com' >> "$NPM_CONFIG_USERCONFIG"
+            echo '//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}' >> "$NPM_CONFIG_USERCONFIG"
+          fi
+          npx --yes yarn@1 install --frozen-lockfile --non-interactive
+
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        if: inputs.frontend-directory != ''
+        id: syft
+
+      # yarn.lock also holds build tooling that never reaches the browser. With frontend-scope
+      # bundle, a production webpack build of a temp copy decides which packages ship: every npm
+      # package with a module in the bundle or an asset copied out of node_modules. Packages syft
+      # left out (it skips devDependencies) are added. If the build fails, the full yarn.lock SBOM
+      # is used instead, with a warning.
+      - name: Frontend SBOM
+        if: inputs.frontend-directory != ''
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+          SCOPE: ${{ inputs.frontend-scope }}
+          BOM: ${{ runner.temp }}/frontend.bom.json
+          WORK: ${{ runner.temp }}/frontend-scope
+        run: |
+          "$SYFT" scan "dir:$FRONTEND_DIR" -o "cyclonedx-json=$BOM"
+          [ "$SCOPE" = bundle ] || exit 0
+
+          fe=$(cd "$FRONTEND_DIR" && pwd)
+          rm -rf "$WORK" && mkdir -p "$WORK/front"
+          tar --exclude=./node_modules -C "$fe" -cf - . | tar -C "$WORK/front" -xf -
+          ln -s "$fe/node_modules" "$WORK/front/node_modules"
+
+          if ! (cd "$WORK/front" && node - > "$WORK/bundled.json" 2> "$WORK/build.log") <<'JS'
+          const fs = require('fs'), path = require('path');
+          const webpack = require('webpack');
+          const config = require('./webpack.config.js')({ production: true }, {});
+          webpack(config, (err, stats) => {
+            if (err) { console.error(err); process.exit(1); }
+            if (stats.hasErrors()) { console.error(stats.toString('errors-only')); process.exit(1); }
+            const json = stats.toJson({ all: false, modules: true, nestedModules: true, assets: true, cachedAssets: true });
+            const files = new Set();
+            const walk = (mods) => (mods || []).forEach((m) => {
+              if (m.nameForCondition) files.add(m.nameForCondition);
+              walk(m.modules);
+            });
+            walk(json.modules);
+            (json.assets || []).forEach((a) => a.info && a.info.sourceFilename && files.add(path.resolve(a.info.sourceFilename)));
+            const pkgs = new Map();
+            for (const f of files) {
+              const m = f.match(/^(.*\/node_modules\/(?:@[^/]+\/)?[^/]+)\//);
+              if (!m) continue;
+              try {
+                const { name, version } = JSON.parse(fs.readFileSync(path.join(fs.realpathSync(m[1]), 'package.json')));
+                if (name && version) pkgs.set(`${name}@${version}`, { name, version });
+              } catch (e) { /* not a package root */ }
+            }
+            process.stdout.write(JSON.stringify([...pkgs.values()]));
+          });
+          JS
+          then
+            tail -n 20 "$WORK/build.log"
+            echo "::warning::Frontend bundle build failed; using the full yarn.lock SBOM"
+            exit 0
+          fi
+
+          # Keep the components the bundle contains, matched on name@version. A bundled version
+          # missing from yarn.lock while the name is present means node_modules is out of sync:
+          # keep yarn.lock's version(s).
+          node - "$BOM" "$WORK/bundled.json" <<'JS'
+          const fs = require('fs');
+          const [bomFile, bundledFile] = process.argv.slice(2);
+          const bom = JSON.parse(fs.readFileSync(bomFile));
+          const bundled = JSON.parse(fs.readFileSync(bundledFile));
+          const npmKey = (c) => {
+            const m = (c.purl || '').match(/^pkg:npm\/([^@?#]+(?:\/[^@?#]+)?)@([^?#]+)/);
+            return m ? `${m[1].replace(/%40/g, '@').toLowerCase()}@${m[2]}` : null;
+          };
+          const nameOf = (key) => key.split('@').slice(0, -1).join('@');
+          const libs = (bom.components || []).filter((c) => c.type === 'library' && npmKey(c));
+          const have = new Set(libs.map(npmKey));
+          const haveNames = new Set([...have].map(nameOf));
+          const b = bundled.map((p) => ({ ...p, key: `${p.name.toLowerCase()}@${p.version}` }));
+          const exact = new Set(b.filter((p) => have.has(p.key)).map((p) => p.key));
+          const mismatch = b.filter((p) => !have.has(p.key) && haveNames.has(nameOf(p.key)));
+          const missing = b.filter((p) => !haveNames.has(nameOf(p.key)));
+          const mismatchNames = new Set(mismatch.map((p) => nameOf(p.key)));
+          const kept = libs.filter((c) => exact.has(npmKey(c)) || mismatchNames.has(nameOf(npmKey(c))));
+          for (const p of missing) {
+            const purl = `pkg:npm/${p.name.replace(/^@/, '%40')}@${p.version}`;
+            kept.push({ type: 'library', 'bom-ref': purl, name: p.name, version: p.version, purl });
+          }
+          // Never upload an empty SBOM: no bundled packages means the scoping went wrong.
+          if (kept.length === 0) {
+            console.log('::warning::No bundled packages found; using the full yarn.lock SBOM');
+            process.exit(0);
+          }
+          const before = (bom.components || []).length;
+          bom.components = kept;
+          const refs = new Set(kept.map((c) => c['bom-ref']));
+          bom.dependencies = (bom.dependencies || []).filter((d) => refs.has(d.ref))
+            .map((d) => ({ ...d, dependsOn: (d.dependsOn || []).filter((r) => refs.has(r)) }));
+          fs.writeFileSync(bomFile, JSON.stringify(bom));
+          console.log(`Bundle scope: ${before} -> ${kept.length} components`);
+          if (missing.length) console.log(`Added (bundled, not in the syft SBOM): ${missing.map((p) => p.key).join(' ')}`);
+          if (mismatch.length) {
+            console.log(`::warning::node_modules differs from yarn.lock for ${mismatch.map((p) => p.key).join(' ')}; used the yarn.lock version`);
+          }
+          JS
+
+      - name: Dependency-Track session
+        env:
+          PROVIDER: ${{ inputs.workload-identity-provider }}
+          SERVICE_ACCOUNT: ${{ inputs.service-account }}
+        run: |
+          audience=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["DT_URL"], safe=""))')
+          id_token=$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | python3 -c 'import json, sys; print(json.load(sys.stdin)["value"])')
+          response=$(curl -sS -w '\n%{http_code}' "$DT_URL/api/v2/oauth/token" \
+            --data-urlencode grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+            --data-urlencode subject_token_type=urn:ietf:params:oauth:token-type:jwt \
+            --data-urlencode "subject_token=$id_token" \
+            --data-urlencode "workload_identity_provider=$PROVIDER" \
+            --data-urlencode "service_account=$SERVICE_ACCOUNT")
+          if [ "$(tail -n1 <<< "$response")" != 200 ]; then
+            echo "::error::Token exchange at $DT_URL failed: $(sed '$d' <<< "$response")"
+            echo "Check the workload identity provider '$PROVIDER' (audience $DT_URL) and a binding on '$SERVICE_ACCOUNT' for this repository."
+            exit 1
+          fi
+          token=$(sed '$d' <<< "$response" | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])')
+          echo "::add-mask::$token"
+          echo "DT_TOKEN=$token" >> "$GITHUB_ENV"
+
+      # Creates the parent project if needed, uploads the SBOMs as its children, waits for the
+      # analysis and saves every finding to $RUNNER_TEMP/dt-findings.json for the score step.
+      - name: Upload and analyse
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          IS_LATEST: ${{ steps.version.outputs.latest }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, time, uuid
+          import urllib.error, urllib.parse, urllib.request
+
+          dt, token = os.environ["DT_URL"], os.environ["DT_TOKEN"]
+          project, version = os.environ["PROJECT"], os.environ["VERSION"]
+          is_latest = os.environ["IS_LATEST"] == "true"
+          temp = os.environ["RUNNER_TEMP"]
+
+          def call(method, path, body=None, content_type="application/json", headers=False):
+              req = urllib.request.Request(dt + "/api" + path, data=body, method=method,
+                                           headers={"Authorization": f"Bearer {token}", "Content-Type": content_type})
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as r:
+                      data = r.read()
+                      parsed = json.loads(data) if data else None
+                      return (parsed, r.headers) if headers else parsed
+              except urllib.error.HTTPError as e:
+                  if e.code == 404 and method == "GET":
+                      return (None, e.headers) if headers else None
+                  hint = (" (the service account needs BOM_UPLOAD, PROJECT_CREATION_UPLOAD, VIEW_PORTFOLIO,"
+                          " VIEW_VULNERABILITY and PORTFOLIO_MANAGEMENT_CREATE)") if e.code == 403 else ""
+                  sys.exit(f"::error::{method} {path}: HTTP {e.code} {e.read().decode()[:300]}{hint}")
+
+          def lookup(name):
+              q = urllib.parse.urlencode({"name": name, "version": version})
+              return call("GET", f"/v1/project/lookup?{q}")
+
+          parent = lookup(project)
+          if not parent:
+              print(f"Creating project {project} {version}")
+              parent = call("PUT", "/v1/project", json.dumps(
+                  {"name": project, "version": version, "classifier": "APPLICATION", "isLatest": is_latest}).encode())
+
+          def upload(name, bom_file):
+              fields = {"projectName": name, "projectVersion": version, "parentName": project,
+                        "parentVersion": version, "autoCreate": "true", "isLatest": str(is_latest).lower()}
+              boundary = uuid.uuid4().hex
+              body = b"".join(
+                  f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+                  for k, v in fields.items())
+              body += (f'--{boundary}\r\nContent-Disposition: form-data; name="bom"; filename="bom.json"\r\n'
+                       f"Content-Type: application/json\r\n\r\n").encode()
+              body += open(bom_file, "rb").read() + f"\r\n--{boundary}--\r\n".encode()
+              return call("POST", "/v1/bom", body, f"multipart/form-data; boundary={boundary}")["token"]
+
+          parts = [("backend", f"{temp}/backend.bom.json")]
+          if os.environ.get("FRONTEND_DIR"):
+              parts.append(("frontend", f"{temp}/frontend.bom.json"))
+          tokens = {label: upload(f"{project}-{label}", f) for label, f in parts}
+
+          deadline = time.time() + 15 * 60
+          for label, t in tokens.items():
+              while (call("GET", f"/v1/bom/token/{t}") or {}).get("processing", False):
+                  if time.time() > deadline:
+                      sys.exit(f"::error::Dependency-Track did not finish analysing the {label} SBOM in 15 minutes")
+                  time.sleep(5)
+              print(f"{label}: analysed")
+
+          projects = []
+          for label, _ in parts:
+              p = lookup(f"{project}-{label}")
+              findings, page = [], 1
+              while True:
+                  chunk, headers = call("GET", f"/v1/finding/project/{p['uuid']}?pageSize=100&pageNumber={page}", headers=True)
+                  findings += chunk or []
+                  if not chunk or len(findings) >= int(headers.get("X-Total-Count") or 0):
+                      break
+                  page += 1
+              projects.append({"label": label, "name": p["name"], "version": version,
+                               "url": f"{dt}/projects/{p['uuid']}", "findings": findings})
+              print(f"{label}: {len(findings)} findings")
+          json.dump({"parentUrl": f"{dt}/projects/{parent['uuid']}", "projects": projects},
+                    open(f"{temp}/dt-findings.json", "w"))
+          PY
+
+      - name: Risk score
+        id: score
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          ICR_B: ${{ inputs.icr-b }}
+          ICR_I: ${{ inputs.icr-i }}
+          ICR_C: ${{ inputs.icr-c }}
+          EXPOSURE: ${{ inputs.exposure }}
+          EPSS_THRESHOLD: ${{ inputs.epss-threshold }}
+        with:
+          script: |
+            const fs = require('fs');
+            const temp = process.env.RUNNER_TEMP;
+
+            const int = (name, max) => {
+              const value = Number(process.env[name]);
+              if (!Number.isInteger(value) || value < 1 || value > max) {
+                throw new Error(`${name} must be an integer 1-${max}, got '${process.env[name]}'`);
+              }
+              return value;
+            };
+            const impact = Math.max(int('ICR_B', 5), int('ICR_I', 5), int('ICR_C', 5));
+            const exposure = int('EXPOSURE', 3);
+            const epssThreshold = Number(process.env.EPSS_THRESHOLD);
+
+            // The same issue often comes back once per source: GHSA-... (GitHub), PYSEC-... (OSV)
+            // and CVE-... (NVD). Group each finding under one key per component:
+            //   GITHUB -> its GHSA id
+            //   OSV    -> the single GHSA it references, else its single CVE mapped to a GHSA
+            //   NVD    -> its CVE mapped to a GHSA
+            // and fall back to the finding's own id. A record that references several GHSAs/CVEs
+            // is left alone rather than merged on a guess.
+            const merge = (findings) => {
+              const comp = (f) => `${f.component.name}@${f.component.version ?? '?'}`;
+              const uniqOrNull = (xs) => { const u = [...new Set(xs)]; return u.length === 1 ? u[0] : null; };
+              const refd = (f, re) => `${f.vulnerability.references ?? ''} ${f.vulnerability.description ?? ''}`.match(re) ?? [];
+              const cve2ghsa = {};
+              for (const f of findings.filter((x) => x.vulnerability.source === 'GITHUB')) {
+                for (const a of f.vulnerability.aliases ?? []) {
+                  if (a.cveId) cve2ghsa[`${comp(f)} ${a.cveId}`] = f.vulnerability.vulnId;
+                }
+              }
+              const groups = new Map();
+              for (const f of findings) {
+                const v = f.vulnerability;
+                let key = null;
+                if (v.source === 'GITHUB') key = v.vulnId;
+                else if (v.source === 'OSV') {
+                  key = uniqOrNull(refd(f, /GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}/g));
+                  if (!key) {
+                    const cve = uniqOrNull(refd(f, /CVE-[0-9]{4}-[0-9]+/g));
+                    key = cve ? cve2ghsa[`${comp(f)} ${cve}`] ?? null : null;
+                  }
+                } else if (v.vulnId.startsWith('CVE-')) key = cve2ghsa[`${comp(f)} ${v.vulnId}`] ?? null;
+                const id = `${comp(f)}\n${key ?? v.vulnId}`;
+                if (!groups.has(id)) groups.set(id, []);
+                groups.get(id).push(f);
+              }
+              const category = (id) => (id.startsWith('GHSA') ? 0 : id.startsWith('CVE') ? 1 : 2);
+              const numbers = (xs) => xs.filter((x) => typeof x === 'number');
+              return [...groups.values()].map((group) => {
+                const worst = group.reduce((a, b) => ((b.vulnerability.severityRank ?? 9) < (a.vulnerability.severityRank ?? 9) ? b : a));
+                const cvss = numbers(group.map((f) => f.vulnerability.cvssV4Score ?? f.vulnerability.cvssV3BaseScore));
+                const epss = numbers(group.map((f) => f.vulnerability.epssScore));
+                const { component } = group[0];
+                return {
+                  component: comp(group[0]),
+                  name: component.name,
+                  version: component.version ?? null,
+                  purl: component.purl ?? null,
+                  latestVersion: component.latestVersion ?? null,
+                  severity: worst.vulnerability.severity ?? null,
+                  rank: worst.vulnerability.severityRank ?? 9,
+                  cvss: cvss.length ? Math.max(...cvss) : null,
+                  kev: group.some((f) => f.vulnerability.isKev === true),
+                  epss: epss.length ? Math.max(...epss) : null,
+                  ids: [...new Set(group.map((f) => f.vulnerability.vulnId))].sort()
+                    .sort((a, b) => category(a) - category(b)),
+                  sources: [...new Set(group.map((f) => f.vulnerability.source))].sort(),
+                };
+              });
+            };
+
+            // CVSS weight: <4.0 -> 1, 4.0-6.9 -> 2, 7.0-8.9 -> 3, >=9.0 -> 4 (v4 base score, else v3;
+            // without a score the severity, and 4 when that is unknown too).
+            // Exploitability: CISA KEV -> 3, EPSS >= epss-threshold -> 2, else 1.
+            const score = (f) => {
+              const wCvss = f.cvss === null
+                ? ({ CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 }[f.severity] ?? 4)
+                : f.cvss >= 9 ? 4 : f.cvss >= 7 ? 3 : f.cvss >= 4 ? 2 : 1;
+              const wExpl = f.kev ? 3 : (f.epss ?? 0) >= epssThreshold ? 2 : 1;
+              const risk = impact * (wCvss + wExpl + exposure);
+              const level = risk >= 36 ? 'Kritiek' : risk >= 21 ? 'Hoog' : 'Laag-middel';
+              return { ...f, wCvss, wExpl, risk, level };
+            };
+
+            const input = JSON.parse(fs.readFileSync(`${temp}/dt-findings.json`, 'utf8'));
+            const findings = input.projects.flatMap((p) => merge(p.findings).map((f) => score({ ...f, project: p.label })))
+              .sort((a, b) => b.risk - a.risk || a.component.localeCompare(b.component) || a.rank - b.rank);
+            fs.writeFileSync(`${temp}/dt-scored.json`, JSON.stringify({ ...input, impact, exposure, findings }));
+
+            const count = (level) => findings.filter((f) => f.level === level).length;
+            const maxRisk = findings.length ? findings[0].risk : 0;
+            core.setOutput('max-risk', String(maxRisk));
+            core.setOutput('max-level', findings.length ? findings[0].level : 'none');
+
+            const advisory = (f) => f.ids.join(' = ');
+            const exploit = (f) => [f.kev ? 'KEV' : null, f.epss !== null ? `EPSS ${Math.round(f.epss * 1000) / 1000}` : null]
+              .filter(Boolean).join(', ');
+            const lines = [
+              `### Dependency-Track: ${findings.length} findings`,
+              '',
+              `Impact ${impact} (max of ICR B/I/C), exposure ${exposure}. ` +
+                `Kritiek: ${count('Kritiek')}, Hoog: ${count('Hoog')}, Laag-middel: ${count('Laag-middel')}. ` +
+                `[Open in Dependency-Track](${input.parentUrl})`,
+            ];
+            if (findings.length) {
+              lines.push('', '| Risk | Level | Component | Advisory | CVSS | Exploitability | Project |',
+                '| ---: | --- | --- | --- | ---: | --- | --- |');
+              for (const f of findings) {
+                lines.push(`| ${f.risk} | ${f.level} | \`${f.component}\` | ${advisory(f)} | ${f.cvss ?? f.severity ?? '?'} ` +
+                  `| ${exploit(f) || '-'} | ${f.project} |`);
+              }
+            }
+            await core.summary.addRaw(lines.join('\n')).write();
+            console.log(`Max risk ${maxRisk} (${findings.length ? findings[0].level : 'no findings'})`);
+
+      - name: Issues
+        id: issues
+        if: inputs.ticket-level != 'none'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          TICKET_LEVEL: ${{ inputs.ticket-level }}
+          TICKET_LABELS: ${{ inputs.ticket-labels }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REF_NAME: "${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || github.ref_name }}"
+          IS_PR: ${{ github.event_name == 'pull_request' }}
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const levels = ['Laag-middel', 'Hoog', 'Kritiek'];
+            const minimum = levels.indexOf(process.env.TICKET_LEVEL);
+            if (minimum < 0) throw new Error(`ticket-level must be Kritiek, Hoog, Laag-middel or none, got '${process.env.TICKET_LEVEL}'`);
+            const labels = process.env.TICKET_LABELS.split(',').map((l) => l.trim()).filter(Boolean);
+            const isPr = process.env.IS_PR === 'true';
+
+            const scored = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/dt-scored.json`, 'utf8'));
+            const relevant = scored.findings.filter((f) => levels.indexOf(f.level) >= minimum);
+
+            // One issue per library (package URL without version), whatever versions or projects it
+            // shows up in. A hidden marker in the body finds the issue again on later runs.
+            const libraryOf = (f) => (f.purl ? f.purl.replace(/[@?#].*$/, '') : f.name);
+            const libraries = new Map();
+            for (const f of relevant) {
+              const key = libraryOf(f);
+              if (!libraries.has(key)) libraries.set(key, []);
+              libraries.get(key).push(f);
+            }
+            const markerOf = (key) => `<!-- dependency-track-library: ${key} -->`;
+
+            const link = (id) => {
+              if (id.startsWith('GHSA-')) return `[${id}](https://github.com/advisories/${id})`;
+              if (id.startsWith('CVE-')) return `[${id}](https://nvd.nist.gov/vuln/detail/${id})`;
+              return `[${id}](https://osv.dev/vulnerability/${id})`;
+            };
+            const body = (key, items) => {
+              const name = items[0].name;
+              const inUse = [...new Map(items.map((f) => [`${f.version} ${f.project}`, f])).values()];
+              const lines = [
+                markerOf(key),
+                `**\`${name}\`** has known vulnerabilities in the version(s) in use. Update it to a version ` +
+                  'that fixes all advisories below; each advisory lists its fixed versions.',
+                '',
+                '| Version in use | Project | Latest known version |',
+                '| --- | --- | --- |',
+                ...inUse.map((f) => `| ${f.version ?? '?'} | ${f.project} | ${f.latestVersion ?? '?'} |`),
+                '',
+                '| Risk | Level | Advisory | CVSS | Exploitability |',
+                '| ---: | --- | --- | ---: | --- |',
+              ];
+              const seen = new Set();
+              for (const f of items) {
+                const id = f.ids.join(' ');
+                if (seen.has(id)) continue;
+                seen.add(id);
+                const exploit = [f.kev ? 'KEV' : null, f.epss !== null ? `EPSS ${Math.round(f.epss * 1000) / 1000}` : null]
+                  .filter(Boolean).join(', ');
+                lines.push(`| ${f.risk} | ${f.level} | ${f.ids.map(link).join(' = ')} | ${f.cvss ?? f.severity ?? '?'} | ${exploit || '-'} |`);
+              }
+              lines.push('', `Risicoscore = Impact ${scored.impact} x (CVSS weight + exploitability + exposure ${scored.exposure}). ` +
+                `Last seen by [this run](${process.env.RUN_URL}) on ${process.env.REF_NAME}; ` +
+                `see [Dependency-Track](${scored.parentUrl}). This description is updated on every run.`);
+              return lines.join('\n');
+            };
+
+            // Besides ticket-labels, each issue is labelled with the project(s) the library is in
+            // (backend, frontend). Labels are only added to existing issues, never removed, so
+            // labels set by hand stay.
+            const projectsOf = (items) => [...new Set(items.map((f) => f.project))].sort();
+            const colors = { security: 'd73a4a', backend: '1d76db', frontend: '5319e7' };
+            for (const label of [...labels, ...projectsOf(relevant)]) {
+              try {
+                await github.rest.issues.createLabel({ owner, repo, name: label, color: colors[label] ?? 'ededed' });
+              } catch (e) {
+                if (e.status !== 422) throw e; // 422: the label exists
+              }
+            }
+            const existing = labels.length
+              ? await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'all', labels: labels[0], per_page: 100 })
+              : [];
+            const addMissingLabels = async (issue, wanted) => {
+              const have = new Set((issue.labels ?? []).map((l) => (typeof l === 'string' ? l : l.name)));
+              const missing = wanted.filter((l) => !have.has(l));
+              if (missing.length) await github.rest.issues.addLabels({ owner, repo, issue_number: issue.number, labels: missing });
+            };
+
+            const created = [], updated = [], reopened = [], skipped = [];
+            for (const [key, items] of libraries) {
+              const count = new Set(items.map((f) => f.ids.join(' '))).size;
+              const title = `Update ${items[0].name} (${items[0].level}: ${count} ${count === 1 ? 'advisory' : 'advisories'})`;
+              const text = body(key, items);
+              const issueLabels = [...labels, ...projectsOf(items)];
+              const matches = existing.filter((i) => !i.pull_request && (i.body ?? '').includes(markerOf(key)));
+              const open = matches.find((i) => i.state === 'open');
+              if (open) {
+                if (open.body !== text || open.title !== title) {
+                  await github.rest.issues.update({ owner, repo, issue_number: open.number, title, body: text });
+                }
+                await addMissingLabels(open, issueLabels);
+                updated.push(open.number);
+                continue;
+              }
+              const closed = matches.sort((a, b) => b.number - a.number)[0];
+              if (closed && (closed.state_reason === 'not_planned' || isPr)) {
+                // Closed as not planned: a decision to accept the risk. On PRs, a closed issue may
+                // have been fixed on the default branch already; the nightly run reopens it if not.
+                skipped.push(closed.number);
+                continue;
+              }
+              if (closed) {
+                await github.rest.issues.update({ owner, repo, issue_number: closed.number, state: 'open', title, body: text });
+                await addMissingLabels(closed, issueLabels);
+                await github.rest.issues.createComment({ owner, repo, issue_number: closed.number,
+                  body: `Reopened: still vulnerable on ${process.env.REF_NAME} ([run](${process.env.RUN_URL})).` });
+                reopened.push(closed.number);
+                continue;
+              }
+              const { data } = await github.rest.issues.create({ owner, repo, title, body: text, labels: issueLabels });
+              created.push(data.number);
+            }
+            core.setOutput('created', created.join(','));
+            core.setOutput('updated', updated.join(','));
+            core.setOutput('reopened', reopened.join(','));
+            console.log(`Issues: created [${created}], updated [${updated}], reopened [${reopened}], ` +
+              `left closed [${skipped}]`);
+
+      - name: Check fail level
+        env:
+          FAIL_LEVEL: ${{ inputs.fail-level }}
+          MAX_LEVEL: ${{ steps.score.outputs.max-level }}
+          MAX_RISK: ${{ steps.score.outputs.max-risk }}
+        run: |
+          rank() { case "$1" in Kritiek) echo 3 ;; Hoog) echo 2 ;; Laag-middel) echo 1 ;; *) echo 0 ;; esac; }
+          case "$FAIL_LEVEL" in
+            none) exit 0 ;;
+            Kritiek|Hoog) ;;
+            *) echo "::error::fail-level must be Kritiek, Hoog or none, got '$FAIL_LEVEL'"; exit 1 ;;
+          esac
+          if [ "$(rank "$MAX_LEVEL")" -ge "$(rank "$FAIL_LEVEL")" ]; then
+            echo "::error::Highest Risicoscore $MAX_RISK is $MAX_LEVEL (fail-level $FAIL_LEVEL); see the job summary and the issues"
+            exit 1
+          fi
+          echo "Highest level: $MAX_LEVEL (fail-level $FAIL_LEVEL)"

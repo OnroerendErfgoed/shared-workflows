@@ -10,6 +10,7 @@ Reusable GitHub Actions workflows for the OnroerendErfgoed repositories. A proje
 | [`release-draft.yml`](.github/workflows/release-draft.yml) | When that PR is merged: creates a draft GitHub release from the changelog section | [`templates/release-draft.yml`](templates/release-draft.yml) |
 | [`python-release.yml`](.github/workflows/python-release.yml) | When a release is published: builds the sdist and wheel of a library and uploads them to the internal package index with twine, or hands them to a publish job for public PyPI | [`templates/python-release.yml`](templates/python-release.yml), [`templates/python-release-pypi.yml`](templates/python-release-pypi.yml) |
 | [`pr-labeler.yml`](.github/workflows/pr-labeler.yml) | Labels a PR based on its branch name | [`templates/pr-labeler.yml`](templates/pr-labeler.yml) |
+| [`dependency-track.yml`](.github/workflows/dependency-track.yml) | On PRs and nightly: SBOMs to Dependency-Track, a Risicoscore per finding, one issue per vulnerable library, red build from a configurable level | [`templates/dependency-track.yml`](templates/dependency-track.yml) |
 
 Call them with the major version tag:
 
@@ -208,6 +209,49 @@ Adds labels to a new PR based on its branch name, with [TimonVS/pr-labeler-actio
 
 Permissions: `contents: read`, `pull-requests: write`.
 
+## `dependency-track.yml`
+
+Scans a project's dependencies for known vulnerabilities with Dependency-Track and scores every finding with the OE risk formula. Run it on PRs and nightly (see the template):
+
+1. **SBOMs.** The backend SBOM comes from `uv.lock` (`uv export --no-dev`) when the project has one, otherwise from the pinned requirements file ([cyclonedx-py](https://github.com/CycloneDX/cyclonedx-python)). With `frontend-directory`, [syft](https://github.com/anchore/syft) reads `yarn.lock`; with `frontend-scope: bundle` (default) a production webpack build of a temp copy narrows that to the packages that actually ship (it calls `webpack.config.js` as `({ production: true }, {})`). If that build fails, the full `yarn.lock` SBOM is used, with a warning.
+2. **Upload.** The SBOMs go to `<project>-backend` and `<project>-frontend`, children of `<project>`. The version is the app version in `pyproject.toml` on `main`/`master`, marked latest; on a pull request the source branch name, so every push to a PR updates the same version (these branch versions stay in Dependency-Track); otherwise the branch or tag name. The job waits for the analysis.
+3. **Risicoscore** per finding: `Impact x (CVSS weight + exploitability + exposure)`, with Impact = max(`icr-b`, `icr-i`, `icr-c`); CVSS weight <4.0: 1, 4.0-6.9: 2, 7.0-8.9: 3, >=9.0: 4 (v4, else v3, else the severity); exploitability CISA KEV: 3, EPSS >= `epss-threshold`: 2, else 1. Levels: Laag-middel <= 20, Hoog 21-35, Kritiek >= 36. The GHSA, PYSEC and CVE records of one issue count once. The job summary lists every finding.
+4. **Issues.** Every library with findings from `ticket-level` gets one issue, listing all its advisories and the versions in use, labelled `ticket-labels` plus `backend` and/or `frontend` for the project(s) it is in (labels are only ever added, so labels set by hand stay). A hidden marker finds it again: an open issue is updated, never duplicated. An issue closed as *not planned* is left alone (accepted risk). One closed as *completed* is reopened by the nightly run while the library is still vulnerable; PR runs leave it closed.
+5. **Fail** when the highest finding reaches `fail-level`.
+
+There is no API key. The job exchanges its GitHub OIDC token for a short-lived Dependency-Track session ([workload identity federation](https://dependencytrack.github.io/docs/next/guides/administration/configuring-workload-identity-federation/), Dependency-Track 5.2+). Under Administration > Access Management in Dependency-Track, once per instance:
+
+1. **Service account** `github-ci` with the permissions `BOM_UPLOAD`, `PROJECT_CREATION_UPLOAD`, `PORTFOLIO_MANAGEMENT_CREATE` (parent project), `VIEW_PORTFOLIO` and `VIEW_VULNERABILITY` (reading the findings), and no API key.
+2. **Workload identity provider** `github-actions`: type OpenID Connect, issuer `https://token.actions.githubusercontent.com`, audience `https://<dependency-track hostname>`, signing keys discovered from the issuer.
+3. **Two bindings** on `github-ci` for provider `github-actions`, because GitHub uses two subject formats: `repo:OnroerendErfgoed/*`, and `repo:OnroerendErfgoed@1157802/*` for repositories created after 2026-07-15. Both with the condition `claims.repository_owner_id == "1157802"`.
+
+| Input | Type | Default | Description |
+| --- | --- | --- | --- |
+| `icr-b`, `icr-i`, `icr-c` | number | required | ICR3.0 Beschikbaarheid, Integriteit, Confidentialiteit, 1-5. |
+| `exposure` | number | required | 1 = internal and isolated, 2 = reachable internally, 3 = reachable from outside. |
+| `epss-threshold` | string | `0.1` | EPSS score from which a finding counts as exploited in the wild. |
+| `fail-level` | string | `Kritiek` | `Kritiek`, `Hoog` or `none`. |
+| `ticket-level` | string | `Hoog` | `Kritiek`, `Hoog`, `Laag-middel` or `none`. |
+| `ticket-labels` | string | `security,dependencies` | Comma-separated; the first one finds existing issues. |
+| `runs-on` | string | `self-hosted` | Runner label, or a JSON list of labels. Public repos must use `ubuntu-latest`. |
+| `project-name` | string | `""` | Parent project. Defaults to the repository name. |
+| `project-version` | string | `""` | Overrides the version: source branch on PRs, `pyproject.toml` on `main`/`master`, else the branch name. |
+| `backend-directory` | string | `.` | Directory holding `pyproject.toml` and `uv.lock` or the requirements file. |
+| `sbom-source` | string | `auto` | `auto` (`uv.lock` if present, else the requirements file), `uv` or `requirements`. |
+| `requirements-file` | string | `requirements.txt` | Pinned runtime requirements, relative to `backend-directory`. |
+| `frontend-directory` | string | `""` | Directory holding `package.json` and `yarn.lock`; empty for no frontend. |
+| `frontend-scope` | string | `bundle` | `bundle` or `lockfile`. |
+| `node-version` | string | `18` | For the frontend. |
+| `github-packages` | boolean | `true` | Install `@OnroerendErfgoed` frontend packages from GitHub Packages, with the job's token. |
+| `server-hostname` | string | `""` | Falls back to the `DEPENDENCY_TRACK_HOSTNAME` Actions variable (org or repo), then to `test-dependencytrack.onroerenderfgoed.be`. |
+| `workload-identity-provider` | string | `github-actions` | Provider name in Dependency-Track. |
+| `service-account` | string | `github-ci` | Service account in Dependency-Track. |
+| `timeout-minutes` | number | `30` | |
+
+Outputs: `max-risk` (highest Risicoscore, `0` without findings) and `max-level` (`Kritiek`, `Hoog`, `Laag-middel` or `none`).
+
+Permissions: `contents: read`, `id-token: write`, `issues: write`, `packages: read`. Secrets: none.
+
 ## Versioning
 
 Callers use the major tag `@v1`, which always points to the latest `v1.x.y` release.
@@ -253,7 +297,7 @@ All third-party actions are pinned to a commit SHA with the version in a comment
 | Job | Checks |
 | --- | --- |
 | `lint` | [actionlint](https://github.com/rhysd/actionlint) (with shellcheck) and [zizmor](https://docs.zizmor.sh/) on `.github/workflows/` and `templates/` |
-| `scripts` | The inline `github-script` code of the changelog and release workflows, extracted from the workflow files and run against a temporary git repository with a mocked GitHub API |
+| `scripts` | The inline `github-script` code of the changelog, release and Dependency-Track workflows, extracted from the workflow files and run against a temporary git repository with a mocked GitHub API |
 | `python-pip-sync`, `python-pip`, `python-uv` | `python-tests.yml` with each installer against [`tests/fixtures/python-app`](tests/fixtures/python-app), a minimal Pyramid app |
 | `python-services` | `python-tests.yml` with PostGIS, Redis and Elasticsearch, a DB setup command, and tests that check each service |
 | `python-es-major` | `python-tests.yml` with `elasticsearch-version: "9"`: the version from the `ES_VERSION_9` variable, or the default `9.2.1` (the org variables aren't shared with this public repo), checked against `$ELASTICSEARCH_VERSION` |

@@ -1,0 +1,37 @@
+# Caller for the shared Dependency-Track scan. Copy to .github/workflows/ in a project repo
+# and fill in the app's ICR3.0 classification and exposure.
+#
+# On every PR to main/master and every night, SBOMs of the backend (and frontend) go to
+# Dependency-Track and every finding gets a Risicoscore. Libraries with Hoog or Kritiek findings
+# get one GitHub issue each; the job fails when a finding reaches fail-level.
+name: Dependency-Track
+
+on:
+  pull_request:
+    branches: [main, master]
+  schedule:
+    - cron: '17 3 * * *' # nightly, on the default branch
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: dependency-track-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-track:
+    uses: OnroerendErfgoed/shared-workflows/.github/workflows/dependency-track.yml@v1
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      packages: read
+    with:
+      icr-b: 3 # ICR3.0 Beschikbaarheid 1-5
+      icr-i: 3 # ICR3.0 Integriteit 1-5
+      icr-c: 3 # ICR3.0 Confidentialiteit 1-5
+      exposure: 3 # 1 = internal and isolated, 2 = reachable internally, 3 = reachable from outside
+      # fail-level: Hoog # default Kritiek; none to never fail
+      # frontend-directory: myapp_frontend # package.json + yarn.lock
+      # backend-directory: backend # when pyproject.toml / uv.lock is not at the root
