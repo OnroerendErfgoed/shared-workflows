@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `python-tests.yml`: the PostGIS, Redis and Elasticsearch services are no longer health-checked before the first step. A "Wait for services" step after the install checks them (`pg_isready`, `redis-cli ping`, `curl localhost:9200`), up to 12 times every 10 seconds, so the services start while the project installs. When a service doesn't come up, the step fails with the last 50 lines of the services' logs.
+
 ## 1.5.0 (2026-10-29)
 
 - `python-tests.yml`: `elasticsearch-version: "8"` or `"9"` uses the version in the `ES_VERSION_8` or `ES_VERSION_9` Actions variable, so the Elasticsearch versions are set once for the organization. Without the variable (e.g. in a public repo it isn't shared with), `8.2.0` / `9.2.1` is used, with a notice in the log. A specific version still works. The version used is available as `$ELASTICSEARCH_VERSION`.
