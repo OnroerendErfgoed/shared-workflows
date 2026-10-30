@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.0 (2026-10-30)
 
 - `python-tests.yml`: the PostGIS, Redis and Elasticsearch services are no longer health-checked before the first step. A "Wait for services" step after the install checks them (`pg_isready`, `redis-cli ping`, `curl localhost:9200`), up to 12 times every 10 seconds, so the services start while the project installs. When a service doesn't come up, the step fails with the last 50 lines of the services' logs.
 
