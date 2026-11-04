@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.0 (2026-11-04)
 
 - `changelog-draft.yml`: also bumps the version in the Sphinx `conf.py` of a `doc`/`docs` directory (`release` gets `x.y.z`; `version` gets `x.y` when it held a short version, else `x.y.z`) and in `CITATION.cff` (`version`, and `date-released` set to today). Only quoted values in `conf.py` are changed; `cff-version` and the versions of references in `CITATION.cff` are left alone.
 
