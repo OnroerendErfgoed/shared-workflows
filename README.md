@@ -89,7 +89,7 @@ Permissions: `contents: read`, `packages: read`.
 
 Runs for open pull requests from `develop` (see `source-branch`) titled `release x.y.z`, when they are opened, reopened, or their title is edited. The caller's trigger limits the target branches to `main`/`master`. It:
 
-1. bumps the version in every `pyproject.toml` (+ `uv.lock`) and `package.json` (+ `package-lock.json`);
+1. bumps the version in every `pyproject.toml` (+ `uv.lock`), `package.json` (+ `package-lock.json`), Sphinx `conf.py` in a `doc`/`docs` directory (`release` gets `x.y.z`; `version` gets `x.y` when it held a short version, else `x.y.z`) and `CITATION.cff` (`version`, and `date-released` set to today);
 2. collects the issues of this release: the milestone `x.y.z`, the issues closed by the PRs merged into `develop` that are part of this release, and issue numbers in their branch names (`feature/123_foo`);
 3. prepends a `x.y.z (DD-MM-YYYY)` section to the changelog, grouped as below, and commits it to the PR branch;
 4. posts the list as a PR comment, with the merged PRs that have no linked issue.

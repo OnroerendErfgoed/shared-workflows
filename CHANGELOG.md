@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `changelog-draft.yml`: also bumps the version in the Sphinx `conf.py` of a `doc`/`docs` directory (`release` gets `x.y.z`; `version` gets `x.y` when it held a short version, else `x.y.z`) and in `CITATION.cff` (`version`, and `date-released` set to today). Only quoted values in `conf.py` are changed; `cff-version` and the versions of references in `CITATION.cff` are left alone.
+
 ## 1.6.0 (2026-10-30)
 
 - `python-tests.yml`: the PostGIS, Redis and Elasticsearch services are no longer health-checked before the first step. A "Wait for services" step after the install checks them (`pg_isready`, `redis-cli ping`, `curl localhost:9200`), up to 12 times every 10 seconds, so the services start while the project installs. When a service doesn't come up, the step fails with the last 50 lines of the services' logs.
