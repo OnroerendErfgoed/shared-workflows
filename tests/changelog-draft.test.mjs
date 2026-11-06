@@ -242,3 +242,53 @@ test('fails for a PR title that is not "release x.y.z"', async () => {
 
   assert.deepEqual(failures, ['PR title "release candidate" does not match "release x.y.z".']);
 });
+
+test('bumps the version in the Sphinx conf.py and CITATION.cff', async () => {
+  const dir = makeRepo({
+    'CHANGES.rst': RST_CHANGELOG,
+    // Short version
+    'docs/conf.py': "project = 'demo'\n# The short X.Y version.\nversion = '1.2'\n# The full version.\nrelease = '1.2.0'\n",
+    // Full version, double quotes
+    'other/docs/source/conf.py': 'version = "1.2.0"\nrelease = "1.2.0"\n',
+    // Only release
+    'third/doc/conf.py': 'release = "0.1.0"\n',
+    // Not quoted: left alone
+    'fourth/docs/conf.py': 'from importlib.metadata import version as get_version\nrelease = get_version("demo")\n',
+    // Not in a docs directory
+    'gunicorn/conf.py': 'version = "1.0"\n',
+    'CITATION.cff': [
+      'cff-version: 1.2.0',
+      'title: demo',
+      'references:',
+      '  - type: software',
+      '    version: 0.9.0',
+      "version: 1.2.0",
+      "date-released: '2023-10-21'",
+      '',
+    ].join('\n'),
+    'sub/CITATION.cff': 'version: "1.2.0"\ndate-released: "2021-12-08"\n',
+  });
+  const { failures } = await runScript(script, { dir, github: github(), pullRequest });
+
+  assert.deepEqual(failures, []);
+  assert.equal(read(dir, 'docs/conf.py'), "project = 'demo'\n# The short X.Y version.\nversion = '1.3'\n# The full version.\nrelease = '1.3.0'\n");
+  assert.equal(read(dir, 'other/docs/source/conf.py'), 'version = "1.3.0"\nrelease = "1.3.0"\n');
+  assert.equal(read(dir, 'third/doc/conf.py'), 'release = "1.3.0"\n');
+  assert.match(read(dir, 'fourth/docs/conf.py'), /release = get_version\("demo"\)/);
+  assert.equal(read(dir, 'gunicorn/conf.py'), 'version = "1.0"\n');
+
+  const citation = read(dir, 'CITATION.cff');
+  assert.match(citation, /^cff-version: 1\.2\.0$/m);
+  assert.match(citation, /^ {4}version: 0\.9\.0$/m);
+  assert.match(citation, /^version: 1\.3\.0$/m);
+  assert.match(citation, /^date-released: '\d{4}-\d{2}-\d{2}'$/m);
+  assert.doesNotMatch(citation, /2023-10-21/);
+  assert.match(read(dir, 'sub/CITATION.cff'), /^version: "1\.3\.0"\ndate-released: "\d{4}-\d{2}-\d{2}"\n$/);
+
+  const comment = read(dir, 'release-comment.md');
+  for (const file of ['docs/conf.py', 'other/docs/source/conf.py', 'third/doc/conf.py', 'CITATION.cff', 'sub/CITATION.cff']) {
+    assert.ok(comment.includes(`\`${file}\``), `${file} in the PR comment`);
+  }
+  assert.ok(!comment.includes('gunicorn/conf.py'));
+  assert.ok(!comment.includes('fourth/docs/conf.py'));
+});

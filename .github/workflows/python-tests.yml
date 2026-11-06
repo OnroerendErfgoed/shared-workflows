@@ -123,6 +123,9 @@ jobs:
         python-version: ${{ fromJSON(inputs.python-versions) }}
 
     # A service with an empty image is not started.
+    # The services have no --health-cmd: the job doesn't wait for them before the first step.
+    # They are checked in the "Wait for services" step, after the install, so they have that
+    # time to start.
     # The images are chosen by the caller (tag, or tag@sha256:digest), so they are not pinned here.
     # The Elasticsearch version expression is repeated in the "Elasticsearch version" step: services
     # can't use env. "8"/"9" become the ES_VERSION_8/ES_VERSION_9 variable, or 8.2.0/9.2.1 without it.
@@ -131,7 +134,6 @@ jobs:
         image: ${{ inputs.redis && inputs.redis-image || '' }} # zizmor: ignore[unpinned-images]
         ports:
           - 6379:6379
-        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
       postgres:
         image: ${{ inputs.postgres && inputs.postgres-image || '' }} # zizmor: ignore[unpinned-images]
         ports:
@@ -140,7 +142,6 @@ jobs:
           POSTGRES_DB: ${{ inputs.postgres-db }}
           POSTGRES_PASSWORD: password
           POSTGRES_HOST_AUTH_METHOD: trust
-        options: --health-cmd "pg_isready -U postgres" --health-interval 10s --health-timeout 5s --health-retries 5
       elasticsearch:
         image: >- # zizmor: ignore[unpinned-images]
           ${{ inputs.elasticsearch-version && format('docker.elastic.co/elasticsearch/elasticsearch:{0}',
@@ -155,7 +156,6 @@ jobs:
           ES_JAVA_OPTS: ${{ inputs.elasticsearch-java-opts || vars.ES_JAVA_OPTS || '-Xms128m -Xmx128m' }}
           ES_HEAP_SIZE: 128m
           MAX_LOCKED_MEMORY: 100000
-        options: --health-cmd "curl -f http://localhost:9200" --health-interval 30s --health-timeout 10s --health-retries 5
 
     defaults:
       run:
@@ -240,6 +240,40 @@ jobs:
           # Later steps use the virtualenv without activating it.
           echo "VIRTUAL_ENV=$VENV" >> "$GITHUB_ENV"
           echo "$VENV/bin" >> "$GITHUB_PATH"
+
+      - name: Wait for services
+        if: inputs.postgres || inputs.redis || inputs.elasticsearch-version != ''
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+          REDIS_CONTAINER: ${{ job.services.redis.id }}
+          ES_CONTAINER: ${{ job.services.elasticsearch.id }}
+        run: |
+          healthy() {
+            local ok=0
+            if [ -n "$PG_CONTAINER" ] && ! docker exec "$PG_CONTAINER" pg_isready -U postgres > /dev/null; then
+              echo "postgres is not ready"; ok=1
+            fi
+            if [ -n "$REDIS_CONTAINER" ] && ! docker exec "$REDIS_CONTAINER" redis-cli ping > /dev/null; then
+              echo "redis is not ready"; ok=1
+            fi
+            if [ -n "$ES_CONTAINER" ] && ! docker exec "$ES_CONTAINER" curl -sf http://localhost:9200 > /dev/null; then
+              echo "elasticsearch is not ready"; ok=1
+            fi
+            return $ok
+          }
+          for ((i = 1; i <= 12; i++)); do
+            if healthy; then
+              echo "All services are running"
+              exit 0
+            fi
+            echo "Services are not healthy yet ($i/12), retrying in 10 seconds..."
+            sleep 10
+          done
+          echo "::error::Services are not healthy after 12 tries"
+          for container in "$PG_CONTAINER" "$REDIS_CONTAINER" "$ES_CONTAINER"; do
+            [ -n "$container" ] && docker logs --tail 50 "$container"
+          done
+          exit 1
 
       - name: Set up test database
         if: inputs.db-setup-command != ''

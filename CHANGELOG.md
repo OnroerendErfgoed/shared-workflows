@@ -4,6 +4,14 @@
 
 - `dependency-track.yml`: on PRs and nightly, uploads CycloneDX SBOMs of the backend (uv.lock or a requirements file) and optional yarn frontend to Dependency-Track, authenticated with the job's GitHub OIDC token instead of an API key. Scores every finding with the OE Risicoscore (ICR impact x CVSS, KEV/EPSS and exposure), creates or updates one issue per vulnerable library, and fails from a configurable level. On scheduled and manual runs that fail, sends the findings at `fail-level` to Sentry as one event per repository, with the optional `sentry-dsn` secret. Caller template in `templates/dependency-track.yml`.
 
+## 1.7.0 (2026-11-04)
+
+- `changelog-draft.yml`: also bumps the version in the Sphinx `conf.py` of a `doc`/`docs` directory (`release` gets `x.y.z`; `version` gets `x.y` when it held a short version, else `x.y.z`) and in `CITATION.cff` (`version`, and `date-released` set to today). Only quoted values in `conf.py` are changed; `cff-version` and the versions of references in `CITATION.cff` are left alone.
+
+## 1.6.0 (2026-10-30)
+
+- `python-tests.yml`: the PostGIS, Redis and Elasticsearch services are no longer health-checked before the first step. A "Wait for services" step after the install checks them (`pg_isready`, `redis-cli ping`, `curl localhost:9200`), up to 12 times every 10 seconds, so the services start while the project installs. When a service doesn't come up, the step fails with the last 50 lines of the services' logs.
+
 ## 1.5.0 (2026-10-29)
 
 - `python-tests.yml`: `elasticsearch-version: "8"` or `"9"` uses the version in the `ES_VERSION_8` or `ES_VERSION_9` Actions variable, so the Elasticsearch versions are set once for the organization. Without the variable (e.g. in a public repo it isn't shared with), `8.2.0` / `9.2.1` is used, with a notice in the log. A specific version still works. The version used is available as `$ELASTICSEARCH_VERSION`.
