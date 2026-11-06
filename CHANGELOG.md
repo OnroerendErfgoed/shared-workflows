@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `dependency-track.yml`: on PRs and nightly, uploads CycloneDX SBOMs of the backend (uv.lock or a requirements file) and optional yarn frontend to Dependency-Track, authenticated with the job's GitHub OIDC token instead of an API key. Scores every finding with the OE Risicoscore (ICR impact x CVSS, KEV/EPSS and exposure), creates or updates one issue per vulnerable library, and fails from a configurable level. On scheduled and manual runs that fail, sends the findings at `fail-level` to Sentry as one event per repository, with the optional `sentry-dsn` secret. Caller template in `templates/dependency-track.yml`.
+
 ## 1.7.0 (2026-11-04)
 
 - `changelog-draft.yml`: also bumps the version in the Sphinx `conf.py` of a `doc`/`docs` directory (`release` gets `x.y.z`; `version` gets `x.y` when it held a short version, else `x.y.z`) and in `CITATION.cff` (`version`, and `date-released` set to today). Only quoted values in `conf.py` are changed; `cff-version` and the versions of references in `CITATION.cff` are left alone.
