@@ -218,6 +218,7 @@ Scans a project's dependencies for known vulnerabilities with Dependency-Track a
 3. **Risicoscore** per finding: `Impact x (CVSS weight + exploitability + exposure)`, with Impact = max(`icr-b`, `icr-i`, `icr-c`); CVSS weight <4.0: 1, 4.0-6.9: 2, 7.0-8.9: 3, >=9.0: 4 (v4, else v3, else the severity); exploitability CISA KEV: 3, EPSS >= `epss-threshold`: 2, else 1. Levels: Laag-middel <= 20, Hoog 21-35, Kritiek >= 36. The GHSA, PYSEC and CVE records of one issue count once. The job summary lists every finding.
 4. **Issues.** Every library with findings from `ticket-level` gets one issue, listing all its advisories and the versions in use, labelled `ticket-labels` plus `backend` and/or `frontend` for the project(s) it is in (labels are only ever added, so labels set by hand stay). A hidden marker finds it again: an open issue is updated, never duplicated. An issue closed as *not planned* is left alone (accepted risk). One closed as *completed* is reopened by the nightly run while the library is still vulnerable; PR runs leave it closed.
 5. **Fail** when the highest finding reaches `fail-level`.
+6. **Sentry.** On scheduled and manual runs (not on PRs), when the job fails on `fail-level` and the caller passes the `sentry-dsn` secret, the findings at `fail-level` go to Sentry as one event: level `fatal` for Kritiek (`error` for Hoog), message `<repo>: Kritiek, Risicoscore 45 (2 findings in 2 libraries)`, environment the branch, release the version, tags `repository`, `max_level`, `max_risk` and `tier` (backend/frontend), and links to the run, the issues and Dependency-Track. The fingerprint is the repository: one Sentry issue per repo, which every failing night adds an event to. A failed send shows as an error in the log, but does not change the result.
 
 There is no API key. The job exchanges its GitHub OIDC token for a short-lived Dependency-Track session ([workload identity federation](https://dependencytrack.github.io/docs/next/guides/administration/configuring-workload-identity-federation/), Dependency-Track 5.2+). Under Administration > Access Management in Dependency-Track, once per instance:
 
@@ -250,7 +251,14 @@ There is no API key. The job exchanges its GitHub OIDC token for a short-lived D
 
 Outputs: `max-risk` (highest Risicoscore, `0` without findings) and `max-level` (`Kritiek`, `Hoog`, `Laag-middel` or `none`).
 
-Permissions: `contents: read`, `id-token: write`, `issues: write`, `packages: read`. Secrets: none.
+Permissions: `contents: read`, `id-token: write`, `issues: write`, `packages: read`. Secrets: `sentry-dsn` (optional), the DSN of the shared `dependency-track` project in Sentry, kept as the organization secret `DEPENDENCY_TRACK_SENTRY_DSN`:
+
+```yaml
+    secrets:
+      sentry-dsn: ${{ secrets.DEPENDENCY_TRACK_SENTRY_DSN }}
+```
+
+In Sentry, an alert on that project (Monitors > Alerts) decides who hears about it: the triggers *a new issue is created* and *a resolved issue regresses* alert once per repo, and again when it comes back after being resolved.
 
 ## Versioning
 

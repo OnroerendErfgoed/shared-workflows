@@ -148,6 +148,7 @@ export async function runScript(script, { dir, github, pullRequest, env = {} }) 
   const outputs = {};
   const failures = [];
   const warnings = [];
+  const secrets = [];
   const summary = {
     text: '',
     addHeading: () => summary,
@@ -161,6 +162,7 @@ export async function runScript(script, { dir, github, pullRequest, env = {} }) 
     setFailed: (message) => { failures.push(message); },
     info: () => {},
     warning: (message) => { warnings.push(message); },
+    setSecret: (value) => { secrets.push(value); },
     summary,
   };
   const exec = {
@@ -178,5 +180,5 @@ export async function runScript(script, { dir, github, pullRequest, env = {} }) 
     process.chdir(previousCwd);
     process.env = previousEnv;
   }
-  return { outputs, failures, warnings, summary: summary.text };
+  return { outputs, failures, warnings, secrets, summary: summary.text };
 }

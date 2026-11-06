@@ -10,6 +10,7 @@ name: Dependency-Track
 # Run it on pull requests (version: the PR's source branch) and on a schedule on main/master
 # (version: the app version in pyproject.toml, marked latest). Both create or update one
 # GitHub issue per vulnerable library, and fail the job when a finding reaches fail-level.
+# Scheduled and manual runs also send that failure to Sentry when the caller passes sentry-dsn.
 #
 # No API key: the job exchanges its GitHub OIDC token for a short-lived Dependency-Track session
 # (workload identity federation, Dependency-Track 5.2+); see the README for the server setup.
@@ -108,6 +109,10 @@ on:
       timeout-minutes:
         type: number
         default: 30
+    secrets:
+      sentry-dsn:
+        description: DSN of the Sentry project for the alerts. Without it, no alerts are sent.
+        required: false
     outputs:
       max-risk:
         description: Highest Risicoscore of all findings (0 without findings).
@@ -695,6 +700,118 @@ jobs:
             core.setOutput('reopened', reopened.join(','));
             console.log(`Issues: created [${created}], updated [${updated}], reopened [${reopened}], ` +
               `left closed [${skipped}]`);
+
+      # Not on pull requests: those fail the PR, which is alert enough. One Sentry issue per
+      # repository (the fingerprint); every run that fails adds an event to it.
+      - name: Sentry alert
+        id: sentry
+        if: ${{ !cancelled() && steps.score.outcome == 'success' && github.event_name != 'pull_request' && inputs.fail-level != 'none' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SENTRY_DSN: ${{ secrets.sentry-dsn }}
+          FAIL_LEVEL: ${{ inputs.fail-level }}
+          TICKET_LABELS: ${{ inputs.ticket-labels }}
+          VERSION: ${{ steps.version.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const crypto = require('crypto');
+            const temp = process.env.RUNNER_TEMP;
+            core.setOutput('send', 'false');
+
+            const levels = ['Laag-middel', 'Hoog', 'Kritiek'];
+            const minimum = levels.indexOf(process.env.FAIL_LEVEL);
+            if (minimum < 1) return; // an invalid fail-level is reported by Check fail level
+            const scored = JSON.parse(fs.readFileSync(`${temp}/dt-scored.json`, 'utf8'));
+            const alerts = scored.findings.filter((f) => levels.indexOf(f.level) >= minimum);
+            if (!alerts.length) return;
+            if (!process.env.SENTRY_DSN) {
+              core.info('No sentry-dsn secret: no Sentry alert');
+              return;
+            }
+
+            // DSN https://<public key>@<host>[/<path>]/<project id> -> the project's envelope endpoint.
+            let dsn;
+            try {
+              dsn = new URL(process.env.SENTRY_DSN);
+            } catch {
+              throw new Error('sentry-dsn is not a URL');
+            }
+            const path = dsn.pathname.match(/^(.*)\/(\d+)\/?$/);
+            if (!dsn.username || !path) throw new Error('sentry-dsn must look like https://<key>@<host>/<project id>');
+            core.setSecret(dsn.username);
+            const endpoint = `${dsn.protocol}//${dsn.host}${path[1]}/api/${path[2]}/envelope/` +
+              `?sentry_key=${dsn.username}&sentry_version=7`;
+
+            const libraryOf = (f) => (f.purl ? f.purl.replace(/[@?#].*$/, '') : f.name);
+            const libraries = new Set(alerts.map(libraryOf)).size;
+            const top = alerts[0];
+            const label = process.env.TICKET_LABELS.split(',').map((l) => l.trim()).find(Boolean);
+            const issues = `${process.env.REPO_URL}/issues` +
+              (label ? `?q=${encodeURIComponent(`is:issue is:open label:${label}`)}` : '');
+            const eventId = crypto.randomUUID().replace(/-/g, '');
+            const event = {
+              event_id: eventId,
+              timestamp: Date.now() / 1000,
+              platform: 'other',
+              logger: 'dependency-track',
+              level: top.level === 'Kritiek' ? 'fatal' : 'error',
+              message: {
+                formatted: `${process.env.REPOSITORY}: ${top.level}, Risicoscore ${top.risk} ` +
+                  `(${alerts.length} ${alerts.length === 1 ? 'finding' : 'findings'} in ` +
+                  `${libraries} ${libraries === 1 ? 'library' : 'libraries'})`,
+              },
+              fingerprint: ['dependency-track', process.env.REPOSITORY],
+              environment: process.env.REF_NAME,
+              release: process.env.VERSION,
+              tags: {
+                repository: process.env.REPOSITORY,
+                max_level: top.level,
+                max_risk: String(top.risk),
+                tier: [...new Set(alerts.map((f) => f.project))].sort().join(','),
+              },
+              contexts: {
+                dependency_track: {
+                  type: 'default',
+                  max_risk: top.risk,
+                  fail_level: process.env.FAIL_LEVEL,
+                  impact: scored.impact,
+                  exposure: scored.exposure,
+                  run: process.env.RUN_URL,
+                  issues,
+                  dependency_track: scored.parentUrl,
+                },
+              },
+              extra: {
+                findings: alerts.map((f) => `${f.risk} ${f.level} ${f.component} ${f.ids.join(' = ')} (${f.project})`),
+              },
+            };
+            const envelope = [
+              { event_id: eventId, sent_at: new Date().toISOString() },
+              { type: 'event' },
+              event,
+            ].map((part) => JSON.stringify(part)).join('\n');
+            fs.writeFileSync(`${temp}/sentry.envelope`, `${envelope}\n`);
+            fs.writeFileSync(`${temp}/sentry.url`, endpoint);
+            core.setOutput('send', 'true');
+            console.log(`Sentry alert: ${event.message.formatted}`);
+
+      # A failed send does not fail the step: the job fails on fail-level right after anyway.
+      - name: Send to Sentry
+        if: ${{ !cancelled() && steps.sentry.outputs.send == 'true' }}
+        run: |
+          if response=$(curl -sS --fail-with-body --max-time 30 \
+            -H 'Content-Type: application/x-sentry-envelope' \
+            --data-binary "@$RUNNER_TEMP/sentry.envelope" \
+            --url "$(cat "$RUNNER_TEMP/sentry.url")" 2>&1); then
+            echo "Sent to Sentry: $response"
+          else
+            echo "::error::Sending the alert to Sentry failed: $response"
+          fi
 
       - name: Check fail level
         env:

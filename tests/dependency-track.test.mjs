@@ -4,6 +4,7 @@ import { extractScript, makeRepo, mockGithub, read, runScript } from './harness.
 
 const scoreScript = extractScript('dependency-track.yml', 'score');
 const issuesScript = extractScript('dependency-track.yml', 'issues');
+const sentryScript = extractScript('dependency-track.yml', 'sentry');
 
 // Impact 5, exposure 3: Risicoscore = 5 x (CVSS weight + exploitability + 3).
 const SCORE_ENV = { ICR_B: '5', ICR_I: '2', ICR_C: '1', EXPOSURE: '3', EPSS_THRESHOLD: '0.1' };
@@ -207,4 +208,74 @@ test('accepts labels that already exist', async () => {
   assert.deepEqual(failures, []);
   assert.deepEqual(github.calls.createLabel.map((l) => l.name), ['security', 'dependencies', 'backend', 'frontend']);
   assert.equal(github.calls.createIssue.length, 3);
+});
+
+const SENTRY_ENV = {
+  SENTRY_DSN: 'https://abc123@sentry.example.be/7',
+  FAIL_LEVEL: 'Kritiek',
+  TICKET_LABELS: 'security,dependencies',
+  VERSION: '1.4.2',
+  REPOSITORY: 'OnroerendErfgoed/demo',
+  REF_NAME: 'master',
+  REPO_URL: 'https://github.com/OnroerendErfgoed/demo',
+  RUN_URL: 'https://github.com/o/r/actions/runs/1',
+};
+
+async function sentry(env = {}) {
+  const { dir } = await scored();
+  const result = await runScript(sentryScript, { dir, github: mockGithub(), env: { ...SENTRY_ENV, ...env } });
+  const sent = result.outputs.send === 'true';
+  return {
+    ...result,
+    url: sent ? read(dir, 'sentry.url') : null,
+    envelope: sent ? read(dir, 'sentry.envelope').trimEnd().split('\n').map((line) => JSON.parse(line)) : null,
+  };
+}
+
+test('builds one Sentry event per repository from the findings at fail-level', async () => {
+  const { outputs, failures, url, envelope, secrets } = await sentry();
+  assert.deepEqual(failures, []);
+  assert.equal(outputs.send, 'true');
+  assert.equal(url, 'https://sentry.example.be/api/7/envelope/?sentry_key=abc123&sentry_version=7');
+  assert.deepEqual(secrets, ['abc123']);
+  const [header, item, event] = envelope;
+  assert.equal(header.event_id, event.event_id);
+  assert.match(event.event_id, /^[0-9a-f]{32}$/);
+  assert.deepEqual(item, { type: 'event' });
+  assert.equal(event.level, 'fatal');
+  assert.deepEqual(event.fingerprint, ['dependency-track', 'OnroerendErfgoed/demo']);
+  assert.equal(event.message.formatted, 'OnroerendErfgoed/demo: Kritiek, Risicoscore 45 (2 findings in 2 libraries)');
+  assert.equal(event.environment, 'master');
+  assert.equal(event.release, '1.4.2');
+  assert.deepEqual(event.tags, { repository: 'OnroerendErfgoed/demo', max_level: 'Kritiek', max_risk: '45', tier: 'backend,frontend' });
+  assert.equal(event.contexts.dependency_track.issues,
+    'https://github.com/OnroerendErfgoed/demo/issues?q=is%3Aissue%20is%3Aopen%20label%3Asecurity');
+  assert.equal(event.contexts.dependency_track.dependency_track, 'https://dt/projects/p');
+  assert.equal(event.extra.findings.length, 2);
+  assert.match(event.extra.findings[0], /^45 Kritiek \S+ GHSA-/);
+});
+
+test('includes Hoog findings in the Sentry event when fail-level is Hoog', async () => {
+  const { envelope } = await sentry({ FAIL_LEVEL: 'Hoog' });
+  const event = envelope[2];
+  assert.equal(event.level, 'fatal');
+  assert.equal(event.extra.findings.length, 4);
+  assert.equal(event.message.formatted, 'OnroerendErfgoed/demo: Kritiek, Risicoscore 45 (4 findings in 3 libraries)');
+});
+
+test('keeps a path prefix of the Sentry DSN', async () => {
+  const { url } = await sentry({ SENTRY_DSN: 'https://k@sentry.example.be/sentry/12' });
+  assert.equal(url, 'https://sentry.example.be/sentry/api/12/envelope/?sentry_key=k&sentry_version=7');
+});
+
+test('sends nothing without a DSN or without findings at fail-level', async () => {
+  assert.equal((await sentry({ SENTRY_DSN: '' })).outputs.send, 'false');
+  const { dir } = await scored({ 'dt-findings.json': findingsFile([BACKEND[4]], []) });
+  const { outputs } = await runScript(sentryScript, { dir, github: mockGithub(), env: SENTRY_ENV });
+  assert.equal(outputs.send, 'false');
+});
+
+test('rejects a malformed DSN without printing it', async () => {
+  await assert.rejects(sentry({ SENTRY_DSN: 'https://sentry.example.be/7' }), /must look like https:\/\/<key>@<host>/);
+  await assert.rejects(sentry({ SENTRY_DSN: 'abc123' }), (e) => e.message === 'sentry-dsn is not a URL');
 });
