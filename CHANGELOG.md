@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.1 (2026-11-12)
 
 - `changelog-draft.yml`: issues of type `Task` are listed under 🧹 Other instead of ✨ Features.
 
