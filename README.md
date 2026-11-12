@@ -100,8 +100,8 @@ Each issue is listed once, in the first category it matches. Empty categories ar
 | --- | --- |
 | 💥 Breaking changes | label `breaking` |
 | 🐛 Bugs | issue type `Bug`, or label `bug` / `fix` |
-| ✨ Features | issue type `Feature`, `Task` or `Collection`, or label `enhancement` / `feature` |
-| 🧹 Other | everything else |
+| ✨ Features | issue type `Feature` or `Collection`, or label `enhancement` / `feature` |
+| 🧹 Other | everything else, including issue type `Task` |
 
 Sub-issues are listed under their top-level parent issue, in the parent's category, also when the parent itself is not part of the release (deeper sub-issues are listed under the top-level parent too). A parent in another repository is shown as `owner/repo#123`. In `.rst` changelogs the nested list gets the blank lines reStructuredText needs. If the parents can't be looked up, the issues are listed without nesting and the run shows a warning.
 

@@ -52,12 +52,12 @@ const EXPECTED_SECTIONS = [
   '✨ Features',
   '',
   '- Nieuwe zoekfilter (#12)',
-  '- Upgrade Python (#13)',
   '- Zoeken op adres (#15)',
   '- Kaartlaag toevoegen (#17)',
   '',
   '🧹 Other',
   '',
+  '- Upgrade Python (#13)',
   '- Docs bijwerken (#14)',
 ].join('\n');
 
