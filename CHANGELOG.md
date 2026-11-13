@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.9.2 (2026-11-13)
+
+- `dependency-track.yml`: the nightly run always scans `main` or `master` (version from `pyproject.toml`, marked latest), also in repositories whose default branch is `develop`, where the schedule fires. A renamed branch the API redirects to is not mistaken for `master`.
+
 ## 1.9.1 (2026-11-13)
 
 - `dependency-track.yml`: an issue closed as *not planned* is reopened by the nightly run like a *completed* one. Accept a risk with a suppressing vulnerability policy in Dependency-Track instead; its findings are left out of the scan. The reopen comment says so, and the README has an example.
