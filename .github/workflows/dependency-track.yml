@@ -187,7 +187,7 @@ jobs:
           ref: ${{ steps.branch.outputs.ref }}
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
 
       # On main/master (also the nightly run in a develop-default repository): the app version
       # declared in pyproject.toml, marked latest. On a PR: the source branch, so every push to the
