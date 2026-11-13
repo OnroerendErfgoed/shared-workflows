@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.9.1 (2026-11-13)
 
-- `dependency-track.yml`: an issue closed as *not planned* is reopened by the nightly run like a *completed* one. Accept a risk with a suppressing vulnerability policy in Dependency-Track instead; its findings are left out of the scan.
+- `dependency-track.yml`: an issue closed as *not planned* is reopened by the nightly run like a *completed* one. Accept a risk with a suppressing vulnerability policy in Dependency-Track instead; its findings are left out of the scan. The reopen comment says so, and the README has an example.
 
 ## 1.9.0 (2026-11-13)
 
