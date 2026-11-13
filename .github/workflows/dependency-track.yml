@@ -149,22 +149,56 @@ jobs:
       FRONTEND_DIRS: ${{ inputs.frontend-directories }}
 
     steps:
+      # Scheduled runs always scan main or master, also in repositories whose default branch is
+      # develop: a schedule fires from the default branch, but production runs main/master.
+      # Pull requests and manual runs scan their own ref.
+      - name: Branch to scan
+        id: branch
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          API_URL: ${{ github.api_url }}
+          TOKEN: ${{ github.token }}
+        run: |
+          name=$REF_NAME
+          ref=
+          if [ "$EVENT" = schedule ] && [ "$REF_NAME" != main ] && [ "$REF_NAME" != master ]; then
+            # The API redirects a renamed branch (e.g. master renamed to develop), so compare the name
+            for branch in master main; do
+              found=$(curl -fsL -H "Authorization: Bearer $TOKEN" "$API_URL/repos/$REPO/branches/$branch" |
+                python3 -c 'import json, sys; print(json.load(sys.stdin)["name"])' 2> /dev/null || true)
+              if [ "$found" = "$branch" ]; then
+                name=$branch
+                ref=$branch
+                break
+              fi
+            done
+            if [ -z "$ref" ]; then
+              echo "::warning::No main or master branch; scanning $REF_NAME"
+            fi
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Scanning $name"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ steps.branch.outputs.ref }}
           persist-credentials: false
 
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
-      # On main/master: the app version declared in pyproject.toml, marked latest. On a PR: the
-      # source branch, so every push to the PR updates the same version. Elsewhere: the branch
-      # or tag name.
+      # On main/master (also the nightly run in a develop-default repository): the app version
+      # declared in pyproject.toml, marked latest. On a PR: the source branch, so every push to the
+      # PR updates the same version. Elsewhere: the branch or tag name.
       - name: Project version
         id: version
         working-directory: ${{ inputs.backend-directory }}
         env:
           VERSION: ${{ inputs.project-version }}
           HEAD_REF: ${{ github.head_ref }}
-          REF_NAME: ${{ github.ref_name }}
+          REF_NAME: ${{ steps.branch.outputs.name }}
         run: |
           latest=false
           if [ -n "$HEAD_REF" ]; then
@@ -713,7 +747,7 @@ jobs:
           TICKET_LEVEL: ${{ inputs.ticket-level }}
           TICKET_LABELS: ${{ inputs.ticket-labels }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          REF_NAME: "${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || github.ref_name }}"
+          REF_NAME: "${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || steps.branch.outputs.name }}"
           IS_PR: ${{ github.event_name == 'pull_request' }}
         with:
           script: |
@@ -851,7 +885,7 @@ jobs:
           TICKET_LABELS: ${{ inputs.ticket-labels }}
           VERSION: ${{ steps.version.outputs.version }}
           REPOSITORY: ${{ github.repository }}
-          REF_NAME: ${{ github.ref_name }}
+          REF_NAME: ${{ steps.branch.outputs.name }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
