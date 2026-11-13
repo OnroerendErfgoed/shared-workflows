@@ -69,6 +69,14 @@ test('merges the GHSA, PYSEC and CVE records of one issue and scores it', async 
   assert.equal(outputs['max-level'], 'Kritiek');
 });
 
+test('shows the calculation of every score in the job summary', async () => {
+  const { summary } = await scored();
+  assert.match(summary, /Risicoscore = Impact 5 \(max of ICR B\/I\/C\) × \(CVSS weight \+ exploitability \+ exposure 3\)/);
+  assert.match(summary, /EPSS >= 0\.1: 2/);
+  // GHSA-dddd: CVSS 5.3 -> 2, no EPSS -> 1.
+  assert.match(summary, /\| 30 \| 5 × \(2 \+ 1 \+ 3\) \| Hoog \| `requests@2\.25\.0` \| GHSA-dddd-eeee-ffff \|/);
+});
+
 test('applies the CVSS, KEV and EPSS weights and the level boundaries', async () => {
   const { data } = await scored();
   const byId = Object.fromEntries(data.findings.map((f) => [f.ids[0], f]));

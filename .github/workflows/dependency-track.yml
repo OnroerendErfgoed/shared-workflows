@@ -687,16 +687,19 @@ jobs:
             const lines = [
               `### Dependency-Track: ${findings.length} findings`,
               '',
-              `Impact ${impact} (max of ICR B/I/C), exposure ${exposure}. ` +
-                `Kritiek: ${count('Kritiek')}, Hoog: ${count('Hoog')}, Laag-middel: ${count('Laag-middel')}. ` +
+              `Risicoscore = Impact ${impact} (max of ICR B/I/C) × (CVSS weight + exploitability + exposure ${exposure}); ` +
+                'CVSS weight <4.0: 1, 4.0-6.9: 2, 7.0-8.9: 3, >=9.0: 4; exploitability KEV: 3, ' +
+                `EPSS >= ${epssThreshold}: 2, else 1.`,
+              '',
+              `Kritiek: ${count('Kritiek')}, Hoog: ${count('Hoog')}, Laag-middel: ${count('Laag-middel')}. ` +
                 `[Open in Dependency-Track](${input.parentUrl})`,
             ];
             if (findings.length) {
-              lines.push('', '| Risk | Level | Component | Advisory | CVSS | Exploitability | Project |',
-                '| ---: | --- | --- | --- | ---: | --- | --- |');
+              lines.push('', '| Risk | Calculation | Level | Component | Advisory | CVSS | Exploitability | Project |',
+                '| ---: | --- | --- | --- | --- | ---: | --- | --- |');
               for (const f of findings) {
-                lines.push(`| ${f.risk} | ${f.level} | \`${f.component}\` | ${advisory(f)} | ${f.cvss ?? f.severity ?? '?'} ` +
-                  `| ${exploit(f) || '-'} | ${f.project} |`);
+                lines.push(`| ${f.risk} | ${impact} × (${f.wCvss} + ${f.wExpl} + ${exposure}) | ${f.level} | \`${f.component}\` ` +
+                  `| ${advisory(f)} | ${f.cvss ?? f.severity ?? '?'} | ${exploit(f) || '-'} | ${f.project} |`);
               }
             }
             await core.summary.addRaw(lines.join('\n')).write();
