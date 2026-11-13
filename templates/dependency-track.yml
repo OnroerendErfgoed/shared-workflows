@@ -1,7 +1,7 @@
 # Caller for the shared Dependency-Track scan. Copy to .github/workflows/ in a project repo
 # and fill in the app's ICR3.0 classification and exposure.
 #
-# On every PR to main/master and every night, SBOMs of the backend (and frontend) go to
+# On every PR to main/master and every night, SBOMs of the backend (and frontends) go to
 # Dependency-Track and every finding gets a Risicoscore. Libraries with Hoog or Kritiek findings
 # get one GitHub issue each; the job fails when a finding reaches fail-level, and the nightly
 # run then alerts Sentry.
@@ -34,7 +34,7 @@ jobs:
       icr-c: 3 # ICR3.0 Confidentialiteit 1-5
       exposure: 3 # 1 = internal and isolated, 2 = reachable internally, 3 = reachable from outside
       # fail-level: Hoog # default Kritiek; none to never fail
-      # frontend-directory: myapp_frontend # package.json + yarn.lock
+      # frontend-directories: frontend # Vue (vite.config.*) or Aurelia (webpack.config.*); several: "frontend legacy/apps"
       # backend-directory: backend # when pyproject.toml / uv.lock is not at the root
     secrets:
       sentry-dsn: ${{ secrets.DEPENDENCY_TRACK_SENTRY_DSN }} # organization secret

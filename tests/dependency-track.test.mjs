@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { extractScript, makeRepo, mockGithub, read, runScript } from './harness.mjs';
@@ -5,6 +6,7 @@ import { extractScript, makeRepo, mockGithub, read, runScript } from './harness.
 const scoreScript = extractScript('dependency-track.yml', 'score');
 const issuesScript = extractScript('dependency-track.yml', 'issues');
 const sentryScript = extractScript('dependency-track.yml', 'sentry');
+const frontendScript = extractScript('dependency-track.yml', 'frontend-sbom');
 
 // Impact 5, exposure 3: Risicoscore = 5 x (CVSS weight + exploitability + 3).
 const SCORE_ENV = { ICR_B: '5', ICR_I: '2', ICR_C: '1', EXPOSURE: '3', EPSS_THRESHOLD: '0.1' };
@@ -278,4 +280,43 @@ test('sends nothing without a DSN or without findings at fail-level', async () =
 test('rejects a malformed DSN without printing it', async () => {
   await assert.rejects(sentry({ SENTRY_DSN: 'https://sentry.example.be/7' }), /must look like https:\/\/<key>@<host>/);
   await assert.rejects(sentry({ SENTRY_DSN: 'abc123' }), (e) => e.message === 'sentry-dsn is not a URL');
+});
+
+async function frontendSbom(files, index) {
+  const dir = makeRepo(files);
+  // The index holds absolute paths, as the Frontend builds step writes them.
+  fs.writeFileSync(`${dir}/frontends/index.tsv`, index.map(([d, source, file]) => `${d}\t${source}\t${dir}/${file}\n`).join(''));
+  const result = await runScript(frontendScript, { dir, github: mockGithub(), env: { WORK: `${dir}/frontends`, VERSION: '1.4.2', PROJECT: 'demo' } });
+  return { ...result, bom: JSON.parse(read(dir, 'frontend.bom.json')) };
+}
+
+test('combines the frontends into one SBOM: build packages and lockfile components', async () => {
+  const { failures, bom } = await frontendSbom({
+    'frontends/1.bundled.json': JSON.stringify([
+      { name: 'vue', version: '3.5.39' },
+      { name: '@OnroerendErfgoed/pyoes', version: '0.26.2' },
+      { name: 'jquery', version: '2.2.4' },
+    ]),
+    'frontends/2.json': JSON.stringify({ components: [
+      { name: 'jquery', version: '2.2.4', purl: 'pkg:npm/jquery@2.2.4' },
+      { name: 'binding', group: '@aurelia', version: '1.0.0', purl: 'pkg:npm/%40aurelia/binding@1.0.0' },
+      { name: 'requests', version: '2.0.0', purl: 'pkg:pypi/requests@2.0.0' },
+      { name: 'no-purl', version: '1.0.0' },
+    ] }),
+  }, [
+    ['frontend', 'bundle', 'frontends/1.bundled.json'],
+    ['legacy/apps', 'lockfile', 'frontends/2.json'],
+  ]);
+  assert.deepEqual(failures, []);
+  assert.equal(bom.bomFormat, 'CycloneDX');
+  assert.deepEqual(bom.metadata.component, { type: 'application', name: 'demo-frontend', version: '1.4.2' });
+  assert.deepEqual(bom.components.map((c) => c.purl), [
+    'pkg:npm/%40aurelia/binding@1.0.0',
+    'pkg:npm/%40OnroerendErfgoed/pyoes@0.26.2',
+    'pkg:npm/jquery@2.2.4',
+    'pkg:npm/vue@3.5.39',
+  ]);
+  const pyoes = bom.components[1];
+  assert.deepEqual(pyoes, { type: 'library', 'bom-ref': pyoes.purl, name: '@OnroerendErfgoed/pyoes', version: '0.26.2', purl: pyoes.purl });
+  assert.equal(bom.components[0].name, '@aurelia/binding');
 });

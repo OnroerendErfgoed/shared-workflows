@@ -1,8 +1,8 @@
 name: Dependency-Track
 
-# Reusable workflow: generates CycloneDX SBOMs of a project's backend (Python) and optional
-# frontend (yarn), uploads them to Dependency-Track and scores every finding with the OE
-# risk formula:
+# Reusable workflow: generates CycloneDX SBOMs of a project's backend (Python, uv) and optional
+# frontends (Vue with Vite, Aurelia with webpack; pnpm, yarn or npm), uploads them to
+# Dependency-Track and scores every finding with the OE risk formula:
 #
 #   Risicoscore = Impact x (CVSS weight + Exploitability + Exposure)
 #   Impact = max(ICR B, I, C)   Laag-middel <= 20, Hoog 21-35, Kritiek >= 36
@@ -67,29 +67,32 @@ on:
         type: string
         default: ""
       backend-directory:
-        description: Directory holding pyproject.toml and uv.lock or the requirements file.
+        description: Directory holding pyproject.toml and uv.lock (or the requirements file).
         type: string
         default: .
       sbom-source:
-        description: "Where the backend SBOM comes from: auto (uv.lock if present, else the requirements file), uv or requirements."
+        description: "Where the backend SBOM comes from: uv (uv.lock) or requirements (requirements-file)."
         type: string
-        default: auto
+        default: uv
       requirements-file:
         description: Pinned runtime requirements, relative to backend-directory, for sbom-source requirements.
         type: string
         default: requirements.txt
-      frontend-directory:
-        description: Directory holding package.json and yarn.lock. Empty for no frontend.
+      frontend-directories:
+        description: >-
+          Frontend directories, separated by spaces, commas or newlines. Each holds package.json and
+          pnpm-lock.yaml, yarn.lock or package-lock.json, and vite.config.* (Vue) or webpack.config.*
+          (Aurelia). They go to Dependency-Track as one frontend project. Empty for no frontend.
         type: string
         default: ""
       frontend-scope:
-        description: "bundle: only packages that end up in the production webpack build; lockfile: everything in yarn.lock."
+        description: "bundle: only packages that reach the browser in a production build; lockfile: everything in the lockfiles."
         type: string
         default: bundle
       node-version:
-        description: Node.js version for the frontend.
+        description: Node.js version for the frontends.
         type: string
-        default: "18"
+        default: "22"
       github-packages:
         description: Install @OnroerendErfgoed frontend packages from GitHub Packages.
         type: boolean
@@ -143,7 +146,7 @@ jobs:
     env:
       DT_URL: https://${{ inputs.server-hostname || vars.DEPENDENCY_TRACK_HOSTNAME || 'test-dependencytrack.onroerenderfgoed.be' }}
       PROJECT: ${{ inputs.project-name || github.event.repository.name }}
-      FRONTEND_DIR: ${{ inputs.frontend-directory }}
+      FRONTEND_DIRS: ${{ inputs.frontend-directories }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -190,153 +193,281 @@ jobs:
           REQUIREMENTS_FILE: ${{ inputs.requirements-file }}
           BOM: ${{ runner.temp }}/backend.bom.json
         run: |
-          if [ "$SBOM_SOURCE" = auto ]; then
-            if [ -f uv.lock ]; then SBOM_SOURCE=uv; else SBOM_SOURCE=requirements; fi
-          fi
           case "$SBOM_SOURCE" in
             uv)
+              if [ ! -f uv.lock ]; then
+                echo "::error::No uv.lock in $PWD (set backend-directory, or sbom-source: requirements)"
+                exit 1
+              fi
               uv export --format cyclonedx1.5 --frozen --no-dev -o "$BOM"
               ;;
             requirements)
               if [ ! -f "$REQUIREMENTS_FILE" ]; then
-                echo "::error::No uv.lock and no $REQUIREMENTS_FILE in $PWD (set backend-directory or requirements-file)"
+                echo "::error::No $REQUIREMENTS_FILE in $PWD (set backend-directory or requirements-file)"
                 exit 1
               fi
               uvx --from cyclonedx-bom==7.5.0 cyclonedx-py requirements "$REQUIREMENTS_FILE" --of JSON -o "$BOM"
               ;;
             *)
-              echo "::error::Unknown sbom-source '$SBOM_SOURCE' (expected auto, uv or requirements)"
+              echo "::error::Unknown sbom-source '$SBOM_SOURCE' (expected uv or requirements)"
               exit 1
               ;;
           esac
           echo "Backend SBOM from $SBOM_SOURCE: $(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1])).get("components", [])))' "$BOM") components"
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: inputs.frontend-directory != ''
+        if: inputs.frontend-directories != ''
         with:
           node-version: ${{ inputs.node-version }}
 
-      # As in frontend-tests.yml: the registry settings go in a user-level .npmrc that only
-      # exists during this step and refers to the token as ${...}, which yarn expands from the
-      # environment. It also hides the runner's own ~/.npmrc.
-      - name: Install frontend dependencies
-        if: inputs.frontend-directory != ''
-        working-directory: ${{ inputs.frontend-directory }}
-        env:
-          GITHUB_PACKAGES: ${{ inputs.github-packages }}
-          GITHUB_PACKAGES_TOKEN: ${{ github.token }}
-          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/npmrc
-        run: |
-          trap 'rm -f "$NPM_CONFIG_USERCONFIG"' EXIT
-          : > "$NPM_CONFIG_USERCONFIG"
-          # shellcheck disable=SC2016
-          if [ "$GITHUB_PACKAGES" = true ]; then
-            echo '@OnroerendErfgoed:registry=https://npm.pkg.github.com' >> "$NPM_CONFIG_USERCONFIG"
-            echo '//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}' >> "$NPM_CONFIG_USERCONFIG"
-          fi
-          npx --yes yarn@1 install --frozen-lockfile --non-interactive
-
       - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
-        if: inputs.frontend-directory != ''
+        if: inputs.frontend-directories != ''
         id: syft
 
-      # yarn.lock also holds build tooling that never reaches the browser. With frontend-scope
-      # bundle, a production webpack build of a temp copy decides which packages ship: every npm
-      # package with a module in the bundle or an asset copied out of node_modules. Packages syft
-      # left out (it skips devDependencies) are added. If the build fails, the full yarn.lock SBOM
-      # is used instead, with a warning.
-      - name: Frontend SBOM
-        if: inputs.frontend-directory != ''
+      # Per frontend directory: install with the package manager of its lockfile (pnpm and yarn
+      # through corepack), then decide what reaches the browser. With frontend-scope bundle, a
+      # production build (Vite or webpack) records every npm package that ships: modules in the
+      # bundle, Sass partials, assets, and files copied out of node_modules. Without a bundler
+      # config, with frontend-scope lockfile, or when the build fails (with a warning), syft reads
+      # the lockfile instead. The results go to $WORK/index.tsv for the Frontend SBOM step.
+      #
+      # As in frontend-tests.yml, the registry settings go in a user-level .npmrc that only exists
+      # during the installs and refers to the token as ${...}; it also hides the runner's ~/.npmrc.
+      - name: Frontend builds
+        if: inputs.frontend-directories != ''
         env:
           SYFT: ${{ steps.syft.outputs.cmd }}
           SCOPE: ${{ inputs.frontend-scope }}
-          BOM: ${{ runner.temp }}/frontend.bom.json
-          WORK: ${{ runner.temp }}/frontend-scope
+          WORK: ${{ runner.temp }}/frontends
+          GITHUB_PACKAGES: ${{ inputs.github-packages }}
+          GITHUB_PACKAGES_TOKEN: ${{ github.token }}
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/npmrc
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
         run: |
-          "$SYFT" scan "dir:$FRONTEND_DIR" -o "cyclonedx-json=$BOM"
-          [ "$SCOPE" = bundle ] || exit 0
+          case "$SCOPE" in
+            bundle|lockfile) ;;
+            *) echo "::error::frontend-scope must be bundle or lockfile, got '$SCOPE'"; exit 1 ;;
+          esac
+          rm -rf "$WORK" && mkdir -p "$WORK/bin"
+          corepack enable --install-directory "$WORK/bin" pnpm yarn
+          export PATH="$WORK/bin:$PATH"
+          root=$PWD
 
-          fe=$(cd "$FRONTEND_DIR" && pwd)
-          rm -rf "$WORK" && mkdir -p "$WORK/front"
-          tar --exclude=./node_modules -C "$fe" -cf - . | tar -C "$WORK/front" -xf -
-          ln -s "$fe/node_modules" "$WORK/front/node_modules"
+          lockfile_sbom() { # dir lockfile index reason
+            echo "$4: using the whole $2"
+            "$SYFT" scan "file:$1/$2" -o "cyclonedx-json=$WORK/$3.json" > /dev/null
+            printf '%s\tlockfile\t%s\n' "$1" "$WORK/$3.json" >> "$WORK/index.tsv"
+          }
 
-          if ! (cd "$WORK/front" && node - > "$WORK/bundled.json" 2> "$WORK/build.log") <<'JS'
-          const fs = require('fs'), path = require('path');
-          const webpack = require('webpack');
-          const config = require('./webpack.config.js')({ production: true }, {});
-          webpack(config, (err, stats) => {
-            if (err) { console.error(err); process.exit(1); }
-            if (stats.hasErrors()) { console.error(stats.toString('errors-only')); process.exit(1); }
+          i=0
+          for dir in ${FRONTEND_DIRS//,/ }; do
+            i=$((i + 1))
+            dir=${dir%/}
+            echo "::group::$dir"
+            if [ ! -f "$dir/package.json" ]; then
+              echo "::error::No package.json in frontend directory '$dir'"
+              exit 1
+            fi
+            cd "$root/$dir"
+            if [ -f pnpm-lock.yaml ]; then pm=pnpm; lock=pnpm-lock.yaml
+            elif [ -f yarn.lock ]; then pm=yarn; lock=yarn.lock
+            elif [ -f package-lock.json ]; then pm=npm; lock=package-lock.json
+            else
+              echo "::error::No pnpm-lock.yaml, yarn.lock or package-lock.json in '$dir'"
+              exit 1
+            fi
+            bundler=
+            if compgen -G 'vite.config.*' > /dev/null; then bundler=vite
+            elif [ -f webpack.config.js ] || [ -f webpack.config.cjs ]; then bundler=webpack
+            fi
+            echo "$dir: $pm ($lock), ${bundler:-no bundler config}"
+
+            if [ "$SCOPE" = lockfile ]; then
+              cd "$root" && lockfile_sbom "$dir" "$lock" "$i" "frontend-scope lockfile"
+              echo "::endgroup::"
+              continue
+            fi
+            if [ -z "$bundler" ]; then
+              echo "::warning::No vite.config.* or webpack.config.* in $dir; its whole $lock is scanned"
+              cd "$root" && lockfile_sbom "$dir" "$lock" "$i" "no bundler"
+              echo "::endgroup::"
+              continue
+            fi
+
+            : > "$NPM_CONFIG_USERCONFIG"
+            # shellcheck disable=SC2016
+            if [ "$GITHUB_PACKAGES" = true ]; then
+              echo '@OnroerendErfgoed:registry=https://npm.pkg.github.com' >> "$NPM_CONFIG_USERCONFIG"
+              echo '//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}' >> "$NPM_CONFIG_USERCONFIG"
+            fi
+            case "$pm" in
+              pnpm) pnpm install --frozen-lockfile ;;
+              yarn)
+                if yarn --version | grep -q '^1\.'; then yarn install --frozen-lockfile --non-interactive
+                else yarn install --immutable; fi
+                ;;
+              npm) npm ci ;;
+            esac
+            rm -f "$NPM_CONFIG_USERCONFIG"
+
+            if ! node --input-type=module - "$bundler" > "$WORK/$i.bundled.json" 2> "$WORK/$i.build.log" <<'JS'
+          import childProcess from 'node:child_process';
+          import fs from 'node:fs';
+          import module from 'node:module';
+          import path from 'node:path';
+          import { pathToFileURL } from 'node:url';
+
+          const bundler = process.argv[2];
+          const root = process.cwd();
+          const req = module.createRequire(path.join(root, 'package.json'));
+          const files = new Set();
+
+          // Files copied out of node_modules (vite-plugin-static-copy, copy-webpack-plugin) reach
+          // the browser without passing through the bundle: record the source of every copy.
+          const record = (src) => {
+            const file = path.resolve(src instanceof URL ? src.pathname : String(src));
+            if (file.includes(`${path.sep}node_modules${path.sep}`)) files.add(file);
+          };
+          const wrap = (obj, name, before) => {
+            const original = obj[name];
+            if (typeof original !== 'function') return;
+            obj[name] = function (...args) { return original.apply(this, before(args)); };
+          };
+          for (const name of ['copyFile', 'copyFileSync', 'cp', 'cpSync', 'createReadStream']) {
+            wrap(fs, name, (args) => { record(args[0]); return args; });
+          }
+          for (const name of ['copyFile', 'cp']) wrap(fs.promises, name, (args) => { record(args[0]); return args; });
+          // A CI build must not open a browser (e.g. rollup-plugin-visualizer with open: true).
+          wrap(childProcess, 'spawn', (args) => (/(^|\/)(xdg-open|open)$/.test(args[0]) ? ['true', [], {}] : args));
+          module.syncBuiltinESMExports();
+
+          if (bundler === 'vite') {
+            const { build } = await import(pathToFileURL(req.resolve('vite')).href);
+            // Sass and Less partials imported from node_modules never become modules: the CSS
+            // plugin only registers them with addWatchFile. Wrap every plugin's transform hook to
+            // see those calls.
+            const watching = (ctx) => new Proxy(ctx, {
+              get(target, key) {
+                if (key === 'addWatchFile') return (file) => { files.add(file); return target.addWatchFile(file); };
+                const value = Reflect.get(target, key);
+                return typeof value === 'function' ? value.bind(target) : value;
+              },
+            });
+            const collect = {
+              name: 'dependency-track-collect',
+              enforce: 'post',
+              configResolved(config) {
+                for (const plugin of config.plugins) {
+                  const hook = plugin.transform;
+                  if (typeof hook === 'function') {
+                    plugin.transform = function (...args) { return hook.apply(watching(this), args); };
+                  } else if (hook && typeof hook.handler === 'function') {
+                    const { handler } = hook;
+                    hook.handler = function (...args) { return handler.apply(watching(this), args); };
+                  }
+                }
+              },
+              generateBundle(_, bundle) {
+                for (const out of Object.values(bundle)) {
+                  if (out.type === 'chunk') Object.keys(out.modules).forEach((id) => files.add(id));
+                  else (out.originalFileNames || []).forEach((f) => files.add(path.resolve(root, f)));
+                }
+              },
+            };
+            await build({ root, mode: 'production', logLevel: 'warn', plugins: [collect] });
+          } else {
+            const webpack = req('webpack');
+            const configFile = fs.existsSync('webpack.config.js') ? 'webpack.config.js' : 'webpack.config.cjs';
+            let config = req(path.join(root, configFile));
+            if (typeof config === 'function') config = config({ production: true }, {});
+            const stats = await new Promise((resolve, reject) => webpack(config, (err, s) => (err ? reject(err) : resolve(s))));
+            if (stats.hasErrors()) throw new Error(stats.toString('errors-only'));
             const json = stats.toJson({ all: false, modules: true, nestedModules: true, assets: true, cachedAssets: true });
-            const files = new Set();
             const walk = (mods) => (mods || []).forEach((m) => {
               if (m.nameForCondition) files.add(m.nameForCondition);
               walk(m.modules);
             });
             walk(json.modules);
             (json.assets || []).forEach((a) => a.info && a.info.sourceFilename && files.add(path.resolve(a.info.sourceFilename)));
-            const pkgs = new Map();
-            for (const f of files) {
-              const m = f.match(/^(.*\/node_modules\/(?:@[^/]+\/)?[^/]+)\//);
-              if (!m) continue;
-              try {
-                const { name, version } = JSON.parse(fs.readFileSync(path.join(fs.realpathSync(m[1]), 'package.json')));
-                if (name && version) pkgs.set(`${name}@${version}`, { name, version });
-              } catch (e) { /* not a package root */ }
-            }
-            process.stdout.write(JSON.stringify([...pkgs.values()]));
-          });
-          JS
-          then
-            tail -n 20 "$WORK/build.log"
-            echo "::warning::Frontend bundle build failed; using the full yarn.lock SBOM"
-            exit 0
-          fi
+          }
 
-          # Keep the components the bundle contains, matched on name@version. A bundled version
-          # missing from yarn.lock while the name is present means node_modules is out of sync:
-          # keep yarn.lock's version(s).
-          node - "$BOM" "$WORK/bundled.json" <<'JS'
-          const fs = require('fs');
-          const [bomFile, bundledFile] = process.argv.slice(2);
-          const bom = JSON.parse(fs.readFileSync(bomFile));
-          const bundled = JSON.parse(fs.readFileSync(bundledFile));
-          const npmKey = (c) => {
-            const m = (c.purl || '').match(/^pkg:npm\/([^@?#]+(?:\/[^@?#]+)?)@([^?#]+)/);
-            return m ? `${m[1].replace(/%40/g, '@').toLowerCase()}@${m[2]}` : null;
-          };
-          const nameOf = (key) => key.split('@').slice(0, -1).join('@');
-          const libs = (bom.components || []).filter((c) => c.type === 'library' && npmKey(c));
-          const have = new Set(libs.map(npmKey));
-          const haveNames = new Set([...have].map(nameOf));
-          const b = bundled.map((p) => ({ ...p, key: `${p.name.toLowerCase()}@${p.version}` }));
-          const exact = new Set(b.filter((p) => have.has(p.key)).map((p) => p.key));
-          const mismatch = b.filter((p) => !have.has(p.key) && haveNames.has(nameOf(p.key)));
-          const missing = b.filter((p) => !haveNames.has(nameOf(p.key)));
-          const mismatchNames = new Set(mismatch.map((p) => nameOf(p.key)));
-          const kept = libs.filter((c) => exact.has(npmKey(c)) || mismatchNames.has(nameOf(npmKey(c))));
-          for (const p of missing) {
-            const purl = `pkg:npm/${p.name.replace(/^@/, '%40')}@${p.version}`;
-            kept.push({ type: 'library', 'bom-ref': purl, name: p.name, version: p.version, purl });
+          const pkgs = new Map();
+          for (const raw of files) {
+            const f = raw.replace(/^\0/, '').replace(/[?#].*$/, '');
+            const m = f.match(/^(.*[\\/]node_modules[\\/](?:@[^\\/]+[\\/])?[^\\/]+)[\\/]/);
+            if (!m) continue;
+            try {
+              const { name, version } = JSON.parse(fs.readFileSync(path.join(fs.realpathSync(m[1]), 'package.json')));
+              if (name && version) pkgs.set(`${name}@${version}`, { name, version });
+            } catch { /* not a package root */ }
           }
-          // Never upload an empty SBOM: no bundled packages means the scoping went wrong.
-          if (kept.length === 0) {
-            console.log('::warning::No bundled packages found; using the full yarn.lock SBOM');
-            process.exit(0);
-          }
-          const before = (bom.components || []).length;
-          bom.components = kept;
-          const refs = new Set(kept.map((c) => c['bom-ref']));
-          bom.dependencies = (bom.dependencies || []).filter((d) => refs.has(d.ref))
-            .map((d) => ({ ...d, dependsOn: (d.dependsOn || []).filter((r) => refs.has(r)) }));
-          fs.writeFileSync(bomFile, JSON.stringify(bom));
-          console.log(`Bundle scope: ${before} -> ${kept.length} components`);
-          if (missing.length) console.log(`Added (bundled, not in the syft SBOM): ${missing.map((p) => p.key).join(' ')}`);
-          if (mismatch.length) {
-            console.log(`::warning::node_modules differs from yarn.lock for ${mismatch.map((p) => p.key).join(' ')}; used the yarn.lock version`);
-          }
+          process.stdout.write(JSON.stringify([...pkgs.values()]));
+          process.exit(0);
           JS
+            then
+              tail -n 30 "$WORK/$i.build.log"
+              echo "::warning::The $bundler build of $dir failed; its whole $lock is scanned"
+              cd "$root" && lockfile_sbom "$dir" "$lock" "$i" "build failed"
+            elif [ "$(node -p "JSON.parse(require('fs').readFileSync('$WORK/$i.bundled.json', 'utf8')).length")" = 0 ]; then
+              # No bundled packages means the scoping went wrong, not that nothing ships.
+              echo "::warning::The $bundler build of $dir shipped no npm packages; its whole $lock is scanned"
+              cd "$root" && lockfile_sbom "$dir" "$lock" "$i" "nothing bundled"
+            else
+              printf '%s\tbundle\t%s\n' "$dir" "$WORK/$i.bundled.json" >> "$WORK/index.tsv"
+            fi
+            cd "$root"
+            echo "::endgroup::"
+          done
+
+      # One CycloneDX SBOM for all frontends: the packages each build shipped, or the npm
+      # components syft found in the lockfile.
+      - name: Frontend SBOM
+        id: frontend-sbom
+        if: inputs.frontend-directories != ''
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          WORK: ${{ runner.temp }}/frontends
+          VERSION: ${{ steps.version.outputs.version }}
+        with:
+          script: |
+            const fs = require('fs');
+            const crypto = require('crypto');
+            const purlOf = (name, version) => `pkg:npm/${name.replace(/^@/, '%40')}@${encodeURIComponent(version)}`;
+            // pkg:npm/%40scope/name@1.0.0 -> { name: '@scope/name', version: '1.0.0' }
+            const fromPurl = (purl) => {
+              const m = (purl || '').match(/^pkg:npm\/((?:%40|@)[^/@?#]+\/)?([^/@?#]+)@([^?#]+)/);
+              return m && { name: `${(m[1] || '').replace(/^%40/, '@')}${decodeURIComponent(m[2])}`, version: decodeURIComponent(m[3]) };
+            };
+
+            const components = new Map();
+            const lines = fs.readFileSync(`${process.env.WORK}/index.tsv`, 'utf8').split('\n').filter(Boolean);
+            for (const line of lines) {
+              const [dir, source, file] = line.split('\t');
+              const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+              const packages = source === 'bundle'
+                ? data
+                : (data.components || []).map((c) => fromPurl(c.purl)).filter(Boolean);
+              for (const { name, version } of packages) {
+                const purl = purlOf(name, version);
+                components.set(purl, { type: 'library', 'bom-ref': purl, name, version, purl });
+              }
+              console.log(`${dir}: ${packages.length} packages (${source === 'bundle' ? 'production build' : 'whole lockfile'})`);
+            }
+
+            const project = process.env.PROJECT;
+            const bom = {
+              bomFormat: 'CycloneDX',
+              specVersion: '1.5',
+              serialNumber: `urn:uuid:${crypto.randomUUID()}`,
+              version: 1,
+              metadata: {
+                timestamp: new Date().toISOString(),
+                component: { type: 'application', name: `${project}-frontend`, version: process.env.VERSION },
+              },
+              components: [...components.values()].sort((a, b) => a.purl.localeCompare(b.purl)),
+            };
+            fs.writeFileSync(`${process.env.RUNNER_TEMP}/frontend.bom.json`, JSON.stringify(bom));
+            console.log(`Frontend SBOM: ${bom.components.length} components`);
 
       - name: Dependency-Track session
         env:
@@ -415,7 +546,7 @@ jobs:
               return call("POST", "/v1/bom", body, f"multipart/form-data; boundary={boundary}")["token"]
 
           parts = [("backend", f"{temp}/backend.bom.json")]
-          if os.environ.get("FRONTEND_DIR"):
+          if os.path.exists(f"{temp}/frontend.bom.json"):
               parts.append(("frontend", f"{temp}/frontend.bom.json"))
           tokens = {label: upload(f"{project}-{label}", f) for label, f in parts}
 

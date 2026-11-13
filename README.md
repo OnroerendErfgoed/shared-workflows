@@ -240,7 +240,7 @@ Permissions: `contents: read`, `pull-requests: write`.
 
 Scans a project's dependencies for known vulnerabilities with Dependency-Track and scores every finding with the OE risk formula. Run it on PRs and nightly (see the template):
 
-1. **SBOMs.** The backend SBOM comes from `uv.lock` (`uv export --no-dev`) when the project has one, otherwise from the pinned requirements file ([cyclonedx-py](https://github.com/CycloneDX/cyclonedx-python)). With `frontend-directory`, [syft](https://github.com/anchore/syft) reads `yarn.lock`; with `frontend-scope: bundle` (default) a production webpack build of a temp copy narrows that to the packages that actually ship (it calls `webpack.config.js` as `({ production: true }, {})`). If that build fails, the full `yarn.lock` SBOM is used, with a warning.
+1. **SBOMs.** The backend SBOM comes from `uv.lock` (`uv export --no-dev`), or with `sbom-source: requirements` from a pinned requirements file ([cyclonedx-py](https://github.com/CycloneDX/cyclonedx-python)). Each of the `frontend-directories` is installed with the package manager of its lockfile (pnpm, yarn or npm; pnpm and yarn through corepack, so `packageManager` in `package.json` is respected). With `frontend-scope: bundle` (default) a production build then records every npm package that reaches the browser: for Vue, `vite build` with `vite.config.*`; for Aurelia, webpack with `webpack.config.*` called as `({ production: true }, {})`. That covers modules in the bundle, Sass partials, assets, and files copied out of `node_modules` (`vite-plugin-static-copy`, `copy-webpack-plugin`); build tooling and devDependencies stay out. A directory without a bundler config, or whose build fails, falls back to its whole lockfile ([syft](https://github.com/anchore/syft)), with a warning; so does every directory with `frontend-scope: lockfile`. All frontends go to Dependency-Track as one SBOM, so during a migration the Aurelia and the Vue app are scanned together.
 2. **Upload.** The SBOMs go to `<project>-backend` and `<project>-frontend`, children of `<project>`. The version is the app version in `pyproject.toml` on `main`/`master`, marked latest; on a pull request the source branch name, so every push to a PR updates the same version (these branch versions stay in Dependency-Track); otherwise the branch or tag name. The job waits for the analysis.
 3. **Risicoscore** per finding: `Impact x (CVSS weight + exploitability + exposure)`, with Impact = max(`icr-b`, `icr-i`, `icr-c`); CVSS weight <4.0: 1, 4.0-6.9: 2, 7.0-8.9: 3, >=9.0: 4 (v4, else v3, else the severity); exploitability CISA KEV: 3, EPSS >= `epss-threshold`: 2, else 1. Levels: Laag-middel <= 20, Hoog 21-35, Kritiek >= 36. The GHSA, PYSEC and CVE records of one issue count once. The job summary lists every finding.
 4. **Issues.** Every library with findings from `ticket-level` gets one issue, listing all its advisories and the versions in use, labelled `ticket-labels` plus `backend` and/or `frontend` for the project(s) it is in (labels are only ever added, so labels set by hand stay). A hidden marker finds it again: an open issue is updated, never duplicated. An issue closed as *not planned* is left alone (accepted risk). One closed as *completed* is reopened by the nightly run while the library is still vulnerable; PR runs leave it closed.
@@ -264,12 +264,12 @@ There is no API key. The job exchanges its GitHub OIDC token for a short-lived D
 | `runs-on` | string | `self-hosted` | Runner label, or a JSON list of labels. Public repos must use `ubuntu-latest`. |
 | `project-name` | string | `""` | Parent project. Defaults to the repository name. |
 | `project-version` | string | `""` | Overrides the version: source branch on PRs, `pyproject.toml` on `main`/`master`, else the branch name. |
-| `backend-directory` | string | `.` | Directory holding `pyproject.toml` and `uv.lock` or the requirements file. |
-| `sbom-source` | string | `auto` | `auto` (`uv.lock` if present, else the requirements file), `uv` or `requirements`. |
-| `requirements-file` | string | `requirements.txt` | Pinned runtime requirements, relative to `backend-directory`. |
-| `frontend-directory` | string | `""` | Directory holding `package.json` and `yarn.lock`; empty for no frontend. |
-| `frontend-scope` | string | `bundle` | `bundle` or `lockfile`. |
-| `node-version` | string | `18` | For the frontend. |
+| `backend-directory` | string | `.` | Directory holding `pyproject.toml` and `uv.lock` (or the requirements file). |
+| `sbom-source` | string | `uv` | `uv` (`uv.lock`) or `requirements` (`requirements-file`). |
+| `requirements-file` | string | `requirements.txt` | Pinned runtime requirements, relative to `backend-directory`, for `sbom-source: requirements`. |
+| `frontend-directories` | string | `""` | Frontend directories, separated by spaces, commas or newlines; each with `package.json`, a lockfile and `vite.config.*` or `webpack.config.*`. Empty for no frontend. |
+| `frontend-scope` | string | `bundle` | `bundle` (what a production build ships) or `lockfile` (everything in the lockfiles). |
+| `node-version` | string | `22` | For the frontends. |
 | `github-packages` | boolean | `true` | Install `@OnroerendErfgoed` frontend packages from GitHub Packages, with the job's token. |
 | `server-hostname` | string | `""` | Falls back to the `DEPENDENCY_TRACK_HOSTNAME` Actions variable (org or repo), then to `test-dependencytrack.onroerenderfgoed.be`. |
 | `workload-identity-provider` | string | `github-actions` | Provider name in Dependency-Track. |
