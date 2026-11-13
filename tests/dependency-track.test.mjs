@@ -194,11 +194,12 @@ test('labels a library found in the backend and the frontend with both', async (
   assert.equal(github.calls.createIssue[0].title, 'Update lodash (Hoog: 1 advisory)');
 });
 
-test('leaves an issue closed as not planned alone', async () => {
+test('reopens an issue closed as not planned too: accepted risks are suppressed in Dependency-Track', async () => {
   const closed = { number: 8, state: 'closed', state_reason: 'not_planned', body: '<!-- dependency-track-library: pkg:npm/lodash -->' };
-  const { github } = await issues({ repoIssues: [closed] });
-  assert.equal(github.calls.updateIssue.length, 0);
-  assert.ok(!github.calls.createIssue.some((i) => i.title.startsWith('Update lodash')));
+  const { github, outputs } = await issues({ repoIssues: [closed] });
+  assert.deepEqual(github.calls.updateIssue.map((i) => [i.issue_number, i.state]), [[8, 'open']]);
+  assert.match(github.calls.createComment[0].body, /add a vulnerability policy that suppresses these advisories/);
+  assert.equal(outputs.reopened, '8');
 });
 
 test('reopens a completed issue on a scheduled run, but not on a pull request', async () => {

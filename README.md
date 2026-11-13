@@ -242,8 +242,8 @@ Scans a project's dependencies for known vulnerabilities with Dependency-Track a
 
 1. **SBOMs.** The backend SBOM comes from `uv.lock` (`uv export --no-dev`), or with `sbom-source: requirements` from a pinned requirements file ([cyclonedx-py](https://github.com/CycloneDX/cyclonedx-python)). Each of the `frontend-directories` is installed with the package manager of its lockfile (pnpm, yarn or npm; pnpm and yarn through corepack, so `packageManager` in `package.json` is respected). With `frontend-scope: bundle` (default) a production build then records every npm package that reaches the browser: for Vue, `vite build` with `vite.config.*`; for Aurelia, webpack with `webpack.config.*` called as `({ production: true }, {})`. That covers modules in the bundle, Sass partials, assets, and files copied out of `node_modules` (`vite-plugin-static-copy`, `copy-webpack-plugin`); build tooling and devDependencies stay out. A directory without a bundler config, or whose build fails, falls back to its whole lockfile ([syft](https://github.com/anchore/syft)), with a warning; so does every directory with `frontend-scope: lockfile`. All frontends go to Dependency-Track as one SBOM, so during a migration the Aurelia and the Vue app are scanned together.
 2. **Upload.** The SBOMs go to `<project>-backend` and `<project>-frontend`, children of `<project>`. The version is the app version in `pyproject.toml` on `main`/`master`, marked latest; on a pull request the source branch name, so every push to a PR updates the same version (these branch versions stay in Dependency-Track); otherwise the branch or tag name. The job waits for the analysis.
-3. **Risicoscore** per finding: `Impact x (CVSS weight + exploitability + exposure)`, with Impact = max(`icr-b`, `icr-i`, `icr-c`); CVSS weight <4.0: 1, 4.0-6.9: 2, 7.0-8.9: 3, >=9.0: 4 (v4, else v3, else the severity); exploitability CISA KEV: 3, EPSS >= `epss-threshold`: 2, else 1. Levels: Laag-middel <= 20, Hoog 21-35, Kritiek >= 36. The GHSA, PYSEC and CVE records of one issue count once. The job summary lists every finding.
-4. **Issues.** Every library with findings from `ticket-level` gets one issue, listing all its advisories and the versions in use, labelled `ticket-labels` plus `backend` and/or `frontend` for the project(s) it is in (labels are only ever added, so labels set by hand stay). A hidden marker finds it again: an open issue is updated, never duplicated. An issue closed as *not planned* is left alone (accepted risk). One closed as *completed* is reopened by the nightly run while the library is still vulnerable; PR runs leave it closed.
+3. **Risicoscore** per finding: `Impact x (CVSS weight + exploitability + exposure)`, with Impact = max(`icr-b`, `icr-i`, `icr-c`); CVSS weight <4.0: 1, 4.0-6.9: 2, 7.0-8.9: 3, >=9.0: 4 (v4, else v3, else the severity); exploitability CISA KEV: 3, EPSS >= `epss-threshold`: 2, else 1. Levels: Laag-middel <= 20, Hoog 21-35, Kritiek >= 36. The GHSA, PYSEC and CVE records of one issue count once. The job summary lists every finding with its calculation, e.g. `35 = 5 × (3 + 1 + 3)`.
+4. **Issues.** Every library with findings from `ticket-level` gets one issue, listing all its advisories and the versions in use, labelled `ticket-labels` plus `backend` and/or `frontend` for the project(s) it is in (labels are only ever added, so labels set by hand stay). A hidden marker finds it again: an open issue is updated, never duplicated. Issues are never closed automatically; a closed issue, *completed* or *not planned*, is reopened by the nightly run while the library still has findings (PR runs leave it closed). Accepted risks are recorded in Dependency-Track instead, see below.
 5. **Fail** when the highest finding reaches `fail-level`.
 6. **Sentry.** On scheduled and manual runs (not on PRs), when the job fails on `fail-level` and the caller passes the `sentry-dsn` secret, the findings at `fail-level` go to Sentry as one event: level `fatal` for Kritiek (`error` for Hoog), message `<repo>: Kritiek, Risicoscore 45 (2 findings in 2 libraries)`, environment the branch, release the version, tags `repository`, `max_level`, `max_risk` and `tier` (backend/frontend), and links to the run, the issues and Dependency-Track. The fingerprint is the repository: one Sentry issue per repo, which every failing night adds an event to. A failed send shows as an error in the log, but does not change the result.
 
@@ -286,6 +286,23 @@ Permissions: `contents: read`, `id-token: write`, `issues: write`, `packages: re
 ```
 
 In Sentry, an alert on that project (Monitors > Alerts) decides who hears about it: the triggers *a new issue is created* and *a resolved issue regresses* alert once per repo, and again when it comes back after being resolved.
+
+### Accepting a risk
+
+An advisory that does not apply to us gets a **vulnerability policy** in Dependency-Track (Policy Management > Vulnerability Policies; needs `POLICY_MANAGEMENT`) with *suppress* on. Suppressed findings are left out of the scan: no score, issue, failure or Sentry alert. A new advisory for the same library still shows up. Use a policy rather than suppressing a single finding, which only applies to one project version (and every PR branch and release is a new version).
+
+Example: setuptools cannot be upgraded to a fixed version (>= 84.1.0) because of pyramid, and its two advisories only apply to macOS and Windows, while we build and deploy on Linux:
+
+| Field | Value |
+| --- | --- |
+| Name | `setuptools: macOS/Windows-only advisories` |
+| Condition | `component.name == "setuptools" && vuln.id in ["GHSA-h35f-9h28-mq5c", "PYSEC-2026-3447", "GHSA-xmj3-9gf7-h52w"]` |
+| Analysis | *Not affected*, justification *Requires environment* |
+| Details | GHSA-h35f-9h28-mq5c (= PYSEC-2026-3447): MANIFEST.in exclusion bypass when building an sdist, only on macOS APFS/HFS+. GHSA-xmj3-9gf7-h52w: Windows path escape during legacy wheel installation. We build and deploy on Linux only; setuptools cannot go to >= 84.1.0 because of pyramid. |
+| Suppress | on |
+| Valid until | one year ahead, to review it again |
+
+List every ID the job summary shows for an advisory (`GHSA-… = PYSEC-… = CVE-…`): Dependency-Track keeps them as separate findings. Add `&& project.name == "<repository>"` to accept a risk for one project only.
 
 ## Versioning
 

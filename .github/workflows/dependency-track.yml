@@ -812,9 +812,11 @@ jobs:
                 continue;
               }
               const closed = matches.sort((a, b) => b.number - a.number)[0];
-              if (closed && (closed.state_reason === 'not_planned' || isPr)) {
-                // Closed as not planned: a decision to accept the risk. On PRs, a closed issue may
-                // have been fixed on the default branch already; the nightly run reopens it if not.
+              // Any closed issue (completed or not planned) comes back while the library is still
+              // vulnerable: an accepted risk is a suppressing vulnerability policy in
+              // Dependency-Track, which keeps its findings out of this run. On PRs, a closed issue
+              // may have been fixed on the default branch already; the nightly run reopens it if not.
+              if (closed && isPr) {
                 skipped.push(closed.number);
                 continue;
               }
@@ -822,7 +824,9 @@ jobs:
                 await github.rest.issues.update({ owner, repo, issue_number: closed.number, state: 'open', title, body: text });
                 await addMissingLabels(closed, issueLabels);
                 await github.rest.issues.createComment({ owner, repo, issue_number: closed.number,
-                  body: `Reopened: still vulnerable on ${process.env.REF_NAME} ([run](${process.env.RUN_URL})).` });
+                  body: `Reopened: still vulnerable on ${process.env.REF_NAME} ([run](${process.env.RUN_URL})). ` +
+                    'To accept the risk, add a vulnerability policy that suppresses these advisories in ' +
+                    `[Dependency-Track](${scored.parentUrl}) instead of closing this issue.` });
                 reopened.push(closed.number);
                 continue;
               }
