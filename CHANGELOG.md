@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `python-tests.yml`: new `linter` input to choose the linter: `flake8` (default), `ruff` (`ruff check --output-format=github`) or `none`. `lint-command` now defaults to `auto` (the command of `linter`); a custom command still replaces it and `lint-command: ""` still skips the lint, so existing callers are unchanged.
+
 ## 1.7.1 (2026-11-12)
 
 - `changelog-draft.yml`: issues of type `Task` are listed under 🧹 Other instead of ✨ Features.

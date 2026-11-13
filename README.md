@@ -28,7 +28,7 @@ Triggers, branch and `paths:` filters always stay in the caller. A called workfl
 
 ## `python-tests.yml`
 
-One job per Python version in `python-versions`. Commands run in `working-directory` with the project's virtualenv on the `PATH`, so `flake8`, `pytest` etc. work without activating it.
+One job per Python version in `python-versions`. Commands run in `working-directory` with the project's virtualenv on the `PATH`, so `flake8`, `ruff`, `pytest` etc. work without activating it.
 
 | Input | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -41,7 +41,8 @@ One job per Python version in `python-versions`. Commands run in `working-direct
 | `requirements-file` | string | `requirements-ci.txt` | For `pip-sync` and `pip`. |
 | `install-command` | string | `""` | Replaces the default install. `pip-sync`/`pip` still get a virtualenv. |
 | `skip-build-hooks` | boolean | `true` | Sets `HATCH_BUILD_NO_HOOKS=true` during the install. |
-| `lint-command` | string | `flake8` | Empty to skip. |
+| `linter` | string | `flake8` | `flake8`, `ruff` (`ruff check`) or `none`. See [Linting](#linting). |
+| `lint-command` | string | `auto` | `auto` runs the command of `linter`; any other value replaces it; empty skips the lint. |
 | `db-setup-command` | string | `""` | Prepares the test database; `$PG_CONTAINER` is the postgres container id, e.g. `scripts/reset_db_test.sh "$PG_CONTAINER"`. |
 | `postgres` | boolean | `false` | Start PostGIS on port 5432 (`POSTGRES_PASSWORD=password`, trust auth). |
 | `postgres-image` | string | `postgis/postgis:13-3.3-alpine` | |
@@ -57,6 +58,32 @@ One job per Python version in `python-versions`. Commands run in `working-direct
 | `timeout-minutes` | number | `15` | Per job. |
 
 Permissions: `contents: read`, `pull-requests: write`. Secrets: none.
+
+### Linting
+
+The lint step runs after the install and the DB setup, before the tests, in `working-directory`. Choose the linter in the caller with `linter`:
+
+```yaml
+jobs:
+  test:
+    uses: OnroerendErfgoed/shared-workflows/.github/workflows/python-tests.yml@v1
+    with:
+      linter: ruff # flake8 when left out
+      test-command: pytest --cov=myapp --cov-report=xml:"$COVERAGE_XML" tests
+```
+
+| Caller sets | Runs |
+| --- | --- |
+| nothing | `flake8` |
+| `linter: flake8` | `flake8` |
+| `linter: ruff` | `ruff check --output-format=github` (findings show as annotations on the PR) |
+| `linter: none` | no lint |
+| `lint-command: <command>` | `<command>` instead of the linter's command, e.g. `ruff check && ruff format --check` or `flake8 myapp tests` |
+| `lint-command: ""` | no lint (same as `linter: none`) |
+
+- The linter is not installed by the workflow: add `flake8` or `ruff` to the project's CI dependencies (`requirements-ci.txt`, the requirements file of `pip`, or the dev group for `uv`).
+- Configure it in the project as usual: `.flake8`, `setup.cfg` or `tox.ini` for flake8; `[tool.ruff]` in `pyproject.toml` or `ruff.toml` for ruff.
+- Moving a repo from flake8 to ruff: replace `flake8` by `ruff` in its CI dependencies, move the settings to `[tool.ruff]`, and add `linter: ruff` to the caller.
 
 ## `frontend-tests.yml`
 

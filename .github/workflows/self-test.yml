@@ -1,7 +1,7 @@
 name: Self-test
 
 # CI for this repository: lints the workflows, tests the inline scripts, runs
-# python-tests.yml against the fixture app with every installer and all services,
+# python-tests.yml against the fixture app with every installer, both linters and all services,
 # builds it with python-release.yml (without upload) and checks the artifact,
 # and frontend-tests.yml with every package manager.
 
@@ -94,6 +94,7 @@ jobs:
       installer: uv
       python-versions: '["3.12"]'
       working-directory: tests/fixtures/python-app
+      linter: ruff
       test-command: pytest tests
       coverage: none
 
