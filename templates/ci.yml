@@ -26,6 +26,7 @@ jobs:
       # App backend on a self-hosted runner, with services:
       python-versions: '["3.11"]'
       installer: uv # or pip-sync (default) / pip
+      linter: ruff # or flake8 (default) / none; the linter must be in the project's dependencies
       postgres: true
       postgres-db: myapp_test
       redis: true
@@ -37,4 +38,4 @@ jobs:
       # runs-on: ubuntu-latest
       # python-versions: '["3.11", "3.12", "3.13"]'
       # requirements-file: requirements-dev.txt
-      # lint-command: ""
+      # linter: none

@@ -16,7 +16,7 @@ name: Changelog draft
 # Grouping, first match wins:
 #  - 💥 Breaking changes: label "breaking"
 #  - 🐛 Bugs: issue type Bug, or label "bug" / "fix"
-#  - ✨ Features: issue type Feature or Task, or label "enhancement" / "feature"
+#  - ✨ Features: issue type Feature or Collection, or label "enhancement" / "feature"
 #  - 🧹 Other: everything else
 #
 # The changelog is CHANGES / CHANGELOG / HISTORY (.rst, .md or .txt), found at the shallowest
@@ -131,7 +131,7 @@ jobs:
             const CATEGORIES = [
               { title: '💥 Breaking changes', labels: ['breaking', 'breaking change', 'breaking-change'], types: [] },
               { title: '🐛 Bugs', labels: ['bug', 'fix'], types: ['bug'] },
-              { title: '✨ Features', labels: ['enhancement', 'feature'], types: ['feature', 'task', 'collection'] },
+              { title: '✨ Features', labels: ['enhancement', 'feature'], types: ['feature', 'collection'] },
               { title: '🧹 Other', labels: [], types: [] },
             ];
             const categoryOf = (issue) => {

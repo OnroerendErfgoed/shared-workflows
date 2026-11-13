@@ -41,10 +41,14 @@ on:
         description: Set HATCH_BUILD_NO_HOOKS=true during the install (skips frontend builds in hatch hooks).
         type: boolean
         default: true
-      lint-command:
-        description: Lint command. Empty to skip.
+      linter:
+        description: "Linter to run: flake8, ruff (ruff check) or none."
         type: string
         default: flake8
+      lint-command:
+        description: Lint command. "auto" runs the command of the chosen linter; any other value replaces it; empty skips the lint.
+        type: string
+        default: auto
       test-command:
         description: Test command. $COVERAGE_XML holds the absolute path the coverage report must be written to.
         type: string
@@ -283,10 +287,23 @@ jobs:
         run: eval "$DB_SETUP_COMMAND"
 
       - name: Lint
-        if: inputs.lint-command != ''
+        if: inputs.linter != 'none' && inputs.lint-command != ''
         env:
+          LINTER: ${{ inputs.linter }}
           LINT_COMMAND: ${{ inputs.lint-command }}
-        run: eval "$LINT_COMMAND"
+        run: |
+          if [ "$LINT_COMMAND" != auto ]; then
+            eval "$LINT_COMMAND"
+            exit
+          fi
+          case "$LINTER" in
+            flake8) flake8 ;;
+            ruff) ruff check --output-format=github ;;
+            *)
+              echo "::error::Unknown linter '$LINTER' (expected flake8, ruff or none)"
+              exit 1
+              ;;
+          esac
 
       - name: Test
         env:
