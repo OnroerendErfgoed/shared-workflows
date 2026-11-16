@@ -116,6 +116,9 @@ on:
       sentry-dsn:
         description: DSN of the Sentry project for the alerts. Without it, no alerts are sent.
         required: false
+      npm-token:
+        description: Token for registry.npmjs.org, for private packages there (e.g. @govflanders).
+        required: false
     outputs:
       max-risk:
         description: Highest Risicoscore of all findings (0 without findings).
@@ -275,6 +278,7 @@ jobs:
           WORK: ${{ runner.temp }}/frontends
           GITHUB_PACKAGES: ${{ inputs.github-packages }}
           GITHUB_PACKAGES_TOKEN: ${{ github.token }}
+          NPM_TOKEN: ${{ secrets.npm-token }}
           NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/npmrc
           COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
         run: |
@@ -333,6 +337,10 @@ jobs:
             if [ "$GITHUB_PACKAGES" = true ]; then
               echo '@OnroerendErfgoed:registry=https://npm.pkg.github.com' >> "$NPM_CONFIG_USERCONFIG"
               echo '//npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}' >> "$NPM_CONFIG_USERCONFIG"
+            fi
+            # shellcheck disable=SC2016
+            if [ -n "$NPM_TOKEN" ]; then
+              echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' >> "$NPM_CONFIG_USERCONFIG"
             fi
             case "$pm" in
               pnpm) pnpm install --frozen-lockfile ;;
