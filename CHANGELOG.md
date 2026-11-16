@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.10.0 (2026-11-16)
+
+- `dependency-track.yml`: new optional `npm-token` secret, a token for registry.npmjs.org, so frontends with private packages there (e.g. `@govflanders`) can be installed. Pass it as in `frontend-tests.yml`: `npm-token: ${{ secrets.NPM_GOV_FLANDERS }}`. The caller template has it commented out.
+
 ## 1.9.2 (2026-11-13)
 
 - `dependency-track.yml`: the nightly run always scans `main` or `master` (version from `pyproject.toml`, marked latest), also in repositories whose default branch is `develop`, where the schedule fires. A renamed branch the API redirects to is not mistaken for `master`.
