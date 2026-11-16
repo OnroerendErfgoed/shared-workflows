@@ -127,6 +127,7 @@ Each issue is listed once, in the first category it matches. Empty categories ar
 | Category | Matches |
 | --- | --- |
 | 💥 Breaking changes | label `breaking` |
+| 🔒 Security | label `security` |
 | 🐛 Bugs | issue type `Bug`, or label `bug` / `fix` |
 | ✨ Features | issue type `Feature` or `Collection`, or label `enhancement` / `feature` |
 | 🧹 Other | everything else, including issue type `Task` |

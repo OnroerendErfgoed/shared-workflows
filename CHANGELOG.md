@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.11.0 (2026-11-16)
+
+- `changelog-draft.yml`: issues with the label `security` are listed under a new 🔒 Security heading, between 💥 Breaking changes and 🐛 Bugs. First match still wins, so a `breaking` security issue stays under Breaking changes, and a security bug moves from Bugs to Security.
+
 ## 1.10.0 (2026-11-16)
 
 - `dependency-track.yml`: new optional `npm-token` secret, a token for registry.npmjs.org, so frontends with private packages there (e.g. `@govflanders`) can be installed. Pass it as in `frontend-tests.yml`: `npm-token: ${{ secrets.NPM_GOV_FLANDERS }}`. The caller template has it commented out.
