@@ -278,11 +278,12 @@ There is no API key. The job exchanges its GitHub OIDC token for a short-lived D
 
 Outputs: `max-risk` (highest Risicoscore, `0` without findings) and `max-level` (`Kritiek`, `Hoog`, `Laag-middel` or `none`).
 
-Permissions: `contents: read`, `id-token: write`, `issues: write`, `packages: read`. Secrets: `sentry-dsn` (optional), the DSN of the shared `dependency-track` project in Sentry, kept as the organization secret `DEPENDENCY_TRACK_SENTRY_DSN`:
+Permissions: `contents: read`, `id-token: write`, `issues: write`, `packages: read`. Secrets: `sentry-dsn` (optional), the DSN of the shared `dependency-track` project in Sentry, kept as the organization secret `DEPENDENCY_TRACK_SENTRY_DSN`; `npm-token` (optional), a token for registry.npmjs.org for frontends with private packages there (e.g. `@govflanders`), as in `frontend-tests.yml`:
 
 ```yaml
     secrets:
       sentry-dsn: ${{ secrets.DEPENDENCY_TRACK_SENTRY_DSN }}
+      npm-token: ${{ secrets.NPM_GOV_FLANDERS }} # only for private npm packages
 ```
 
 In Sentry, an alert on that project (Monitors > Alerts) decides who hears about it: the triggers *a new issue is created* and *a resolved issue regresses* alert once per repo, and again when it comes back after being resolved.
