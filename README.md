@@ -239,23 +239,37 @@ Permissions: `contents: read`, `pull-requests: write`.
 
 ## `dependency-track.yml`
 
-Scans a project's dependencies for known vulnerabilities with Dependency-Track and scores every finding with the OE risk formula. Run it on PRs to `main`/`master` and nightly (see the template). The nightly run always scans `main` or `master`, also in a repository whose default branch is `develop` (the schedule fires from there, the workflow checks out `master`, else `main`); a manual run scans the branch it is started on.
+Scans a project's dependencies for known vulnerabilities with Dependency-Track and scores every finding with the OE risk formula. Dependency-Track keeps **one version of the project per environment** (`dev`, `test`, `prod`), holding the code deployed there. The caller template runs it in three ways:
+
+| Trigger | What is scanned | Version in Dependency-Track | Issues | Sentry |
+| --- | --- | --- | --- | --- |
+| **Deploy**: `gh workflow run dependency-track.yml -f environment=prod -f ref=2.14.0` | the deployed ref, which is recorded first | `prod` | prod only | yes |
+| **Nightly** (schedule, or a manual run without `environment`) | the commit recorded for each environment; one job per environment | `dev`, `test`, `prod` | prod only | yes |
+| **Pull request** to `main`/`master` | the PR | `pr-<number>`, deleted when the job ends | yes | no (the PR fails) |
+
+An environment without a recorded deployment is skipped by the nightly run, except `prod`, which then scans `main` or `master` (also in a repository whose default branch is `develop`). A manual run with `environment` but without `ref` rescans that environment's recorded deployment.
+
+The deploy and the nightly run start from the default branch and check out the deployed commit themselves, so the caller workflow must be on the default branch, and older tags without it can still be scanned.
+
+**The deploy record.** A deploy stores, on `<project> <environment>`, the properties `deploy/ref`, `deploy/sha`, `deploy/time` (UTC), `deploy/by` (the GitHub user who started the run) and `deploy/run`, before anything is built, so a failing scan never loses it. After the scan it adds `deploy/version` (from `pyproject.toml`) and sets the project description, e.g. *Deployed 2.14.0 (2.14.0 at a1b2c3d) on 2026-11-17 14:02 CET by jdoe*, which is the first thing you see when you open the project. The nightly run scans the recorded `deploy/sha`, so a branch that moved on after the deploy is not mistaken for what runs. Every scan outside PRs also keeps the scoring inputs as `risk/icr-b`, `risk/icr-i`, `risk/icr-c`, `risk/exposure` and `risk/epss-threshold`, so the server SBOMs of the same project (OS and services, uploaded by the Wazuh server) can be scored the same way.
 
 1. **SBOMs.** The backend SBOM comes from `uv.lock` (`uv export --no-dev`), or with `sbom-source: requirements` from a pinned requirements file ([cyclonedx-py](https://github.com/CycloneDX/cyclonedx-python)). Each of the `frontend-directories` is installed with the package manager of its lockfile (pnpm, yarn or npm; pnpm and yarn through corepack, so `packageManager` in `package.json` is respected). With `frontend-scope: bundle` (default) a production build then records every npm package that reaches the browser: for Vue, `vite build` with `vite.config.*`; for Aurelia, webpack with `webpack.config.*` called as `({ production: true }, {})`. That covers modules in the bundle, Sass partials, assets, and files copied out of `node_modules` (`vite-plugin-static-copy`, `copy-webpack-plugin`); build tooling and devDependencies stay out. A directory without a bundler config, or whose build fails, falls back to its whole lockfile ([syft](https://github.com/anchore/syft)), with a warning; so does every directory with `frontend-scope: lockfile`. All frontends go to Dependency-Track as one SBOM, so during a migration the Aurelia and the Vue app are scanned together.
-2. **Upload.** The SBOMs go to `<project>-backend` and `<project>-frontend`, children of `<project>`. The version is the app version in `pyproject.toml` on `main`/`master`, marked latest; on a pull request the source branch name, so every push to a PR updates the same version (these branch versions stay in Dependency-Track); otherwise the branch or tag name. The job waits for the analysis.
+2. **Upload.** The SBOMs go to `<project>-backend` and `<project>-frontend`, children of `<project>`, all with the environment as version; `prod` is marked latest. The job waits for the analysis. Scans of one environment never run at the same time; a new push to a PR cancels the scan of the previous one. A PR's throwaway version is deleted at the end of its job, also when it failed or was cancelled; one left behind anyway is deleted by the nightly run once the PR is closed.
 3. **Risicoscore** per finding: `Impact x (CVSS weight + exploitability + exposure)`, with Impact = max(`icr-b`, `icr-i`, `icr-c`); CVSS weight <4.0: 1, 4.0-6.9: 2, 7.0-8.9: 3, >=9.0: 4 (v4, else v3, else the severity); exploitability CISA KEV: 3, EPSS >= `epss-threshold`: 2, else 1. Levels: Laag-middel <= 20, Hoog 21-35, Kritiek >= 36. The GHSA, PYSEC and CVE records of one issue count once. The job summary lists every finding with its calculation, e.g. `35 = 5 × (3 + 1 + 3)`.
-4. **Issues.** Every library with findings from `ticket-level` gets one issue, listing all its advisories and the versions in use, labelled `ticket-labels` plus `backend` and/or `frontend` for the project(s) it is in (labels are only ever added, so labels set by hand stay). A hidden marker finds it again: an open issue is updated, never duplicated. Issues are never closed automatically; a closed issue, *completed* or *not planned*, is reopened by the nightly run while the library still has findings (PR runs leave it closed). Accepted risks are recorded in Dependency-Track instead, see below.
+4. **Issues** (pull requests and `prod`). Every library with findings from `ticket-level` gets one issue, listing all its advisories and the versions in use, labelled `ticket-labels` plus `backend` and/or `frontend` for the project(s) it is in (labels are only ever added, so labels set by hand stay). A hidden marker finds it again: an open issue is updated, never duplicated. Issues are never closed automatically; a closed issue, *completed* or *not planned*, is reopened by a `prod` scan while the library still has findings (PR runs leave it closed). Accepted risks are recorded in Dependency-Track instead, see below. `dev` and `test` only show their findings in Dependency-Track and Sentry.
 5. **Fail** when the highest finding reaches `fail-level`.
-6. **Sentry.** On scheduled and manual runs (not on PRs), when the job fails on `fail-level` and the caller passes the `sentry-dsn` secret, the findings at `fail-level` go to Sentry as one event: level `fatal` for Kritiek (`error` for Hoog), message `<repo>: Kritiek, Risicoscore 45 (2 findings in 2 libraries)`, environment the branch, release the version, tags `repository`, `max_level`, `max_risk` and `tier` (backend/frontend), and links to the run, the issues and Dependency-Track. The fingerprint is the repository: one Sentry issue per repo, which every failing night adds an event to. A failed send shows as an error in the log, but does not change the result.
+6. **Sentry** (every environment, not on PRs). When the job fails on `fail-level` and the caller passes the `sentry-dsn` secret, the findings at `fail-level` go to Sentry as one event: level `fatal` for Kritiek (`error` for Hoog), message `<repo> <environment>: Kritiek, Risicoscore 45 (2 findings in 2 libraries)`, environment the environment, release the app version, tags `repository`, `max_level`, `max_risk` and `tier` (backend/frontend), and links to the run, the issues and Dependency-Track. The fingerprint is the repository and the environment: one Sentry issue per repo and environment, which every failing run adds an event to. A failed send shows as an error in the log, but does not change the result.
 
 There is no API key. The job exchanges its GitHub OIDC token for a short-lived Dependency-Track session ([workload identity federation](https://dependencytrack.github.io/docs/next/guides/administration/configuring-workload-identity-federation/), Dependency-Track 5.2+). Under Administration > Access Management in Dependency-Track, once per instance:
 
-1. **Service account** `github-ci` with the permissions `BOM_UPLOAD`, `PROJECT_CREATION_UPLOAD`, `PORTFOLIO_MANAGEMENT_CREATE` (parent project), `VIEW_PORTFOLIO` and `VIEW_VULNERABILITY` (reading the findings), and no API key.
+1. **Service account** `github-ci` with the permissions `BOM_UPLOAD`, `PROJECT_CREATION_UPLOAD`, `VIEW_PORTFOLIO` and `VIEW_VULNERABILITY` (reading the findings), `PORTFOLIO_MANAGEMENT_CREATE` (parent project, new properties), `PORTFOLIO_MANAGEMENT_READ` (reading the deploy record), `PORTFOLIO_MANAGEMENT_UPDATE` (properties, description) and `PORTFOLIO_MANAGEMENT_DELETE` (throwaway PR versions), and no API key. Dependency-Track cannot limit deleting to some versions: the workflow only deletes `pr-<number>` versions, but the account could delete any project.
 2. **Workload identity provider** `github-actions`: type OpenID Connect, issuer `https://token.actions.githubusercontent.com`, audience `https://<dependency-track hostname>`, signing keys discovered from the issuer.
 3. **Two bindings** on `github-ci` for provider `github-actions`, because GitHub uses two subject formats: `repo:OnroerendErfgoed/*`, and `repo:OnroerendErfgoed@1157802/*` for repositories created after 2026-07-15. Both with the condition `claims.repository_owner_id == "1157802"`.
 
 | Input | Type | Default | Description |
 | --- | --- | --- | --- |
+| `environment` | string | `""` | Environment just deployed: `dev`, `test` or `prod`. Empty: every environment (nightly). Ignored on pull requests. |
+| `ref` | string | `""` | Branch, tag or commit deployed to `environment`; recorded, then scanned. Empty: rescan the recorded deployment. |
 | `icr-b`, `icr-i`, `icr-c` | number | required | ICR3.0 Beschikbaarheid, Integriteit, Confidentialiteit, 1-5. |
 | `exposure` | number | required | 1 = internal and isolated, 2 = reachable internally, 3 = reachable from outside. |
 | `epss-threshold` | string | `0.1` | EPSS score from which a finding counts as exploited in the wild. |
@@ -264,7 +278,6 @@ There is no API key. The job exchanges its GitHub OIDC token for a short-lived D
 | `ticket-labels` | string | `security,dependencies` | Comma-separated; the first one finds existing issues. |
 | `runs-on` | string | `self-hosted` | Runner label, or a JSON list of labels. Public repos must use `ubuntu-latest`. |
 | `project-name` | string | `""` | Parent project. Defaults to the repository name. |
-| `project-version` | string | `""` | Overrides the version: source branch on PRs, `pyproject.toml` on `main`/`master`, else the branch name. |
 | `backend-directory` | string | `.` | Directory holding `pyproject.toml` and `uv.lock` (or the requirements file). |
 | `sbom-source` | string | `uv` | `uv` (`uv.lock`) or `requirements` (`requirements-file`). |
 | `requirements-file` | string | `requirements.txt` | Pinned runtime requirements, relative to `backend-directory`, for `sbom-source: requirements`. |
@@ -275,11 +288,9 @@ There is no API key. The job exchanges its GitHub OIDC token for a short-lived D
 | `server-hostname` | string | `""` | Falls back to the `DEPENDENCY_TRACK_HOSTNAME` Actions variable (org or repo), then to `test-dependencytrack.onroerenderfgoed.be`. |
 | `workload-identity-provider` | string | `github-actions` | Provider name in Dependency-Track. |
 | `service-account` | string | `github-ci` | Service account in Dependency-Track. |
-| `timeout-minutes` | number | `30` | |
+| `timeout-minutes` | number | `30` | Per scan job. |
 
-Outputs: `max-risk` (highest Risicoscore, `0` without findings) and `max-level` (`Kritiek`, `Hoog`, `Laag-middel` or `none`).
-
-Permissions: `contents: read`, `id-token: write`, `issues: write`, `packages: read`. Secrets: `sentry-dsn` (optional), the DSN of the shared `dependency-track` project in Sentry, kept as the organization secret `DEPENDENCY_TRACK_SENTRY_DSN`; `npm-token` (optional), a token for registry.npmjs.org for frontends with private packages there (e.g. `@govflanders`), as in `frontend-tests.yml`:
+Permissions: `contents: read`, `id-token: write`, `issues: write`, `packages: read`, `pull-requests: read` (the nightly run checks whether a leftover PR version's PR is closed). Secrets: `sentry-dsn` (optional), the DSN of the shared `dependency-track` project in Sentry, kept as the organization secret `DEPENDENCY_TRACK_SENTRY_DSN`; `npm-token` (optional), a token for registry.npmjs.org for frontends with private packages there (e.g. `@govflanders`), as in `frontend-tests.yml`:
 
 ```yaml
     secrets:
@@ -287,11 +298,11 @@ Permissions: `contents: read`, `id-token: write`, `issues: write`, `packages: re
       npm-token: ${{ secrets.NPM_GOV_FLANDERS }} # only for private npm packages
 ```
 
-In Sentry, an alert on that project (Monitors > Alerts) decides who hears about it: the triggers *a new issue is created* and *a resolved issue regresses* alert once per repo, and again when it comes back after being resolved.
+In Sentry, an alert on that project (Monitors > Alerts) decides who hears about it: the triggers *a new issue is created* and *a resolved issue regresses* alert once per repo and environment, and again when it comes back after being resolved. Filter on the environment to route prod differently from dev and test.
 
 ### Accepting a risk
 
-An advisory that does not apply to us gets a **vulnerability policy** in Dependency-Track (Policy Management > Vulnerability Policies; needs `POLICY_MANAGEMENT`) with *suppress* on. Suppressed findings are left out of the scan: no score, issue, failure or Sentry alert. A new advisory for the same library still shows up. Use a policy rather than suppressing a single finding, which only applies to one project version (and every PR branch and release is a new version).
+An advisory that does not apply to us gets a **vulnerability policy** in Dependency-Track (Policy Management > Vulnerability Policies; needs `POLICY_MANAGEMENT`) with *suppress* on. Suppressed findings are left out of the scan: no score, issue, failure or Sentry alert. A new advisory for the same library still shows up. Use a policy rather than suppressing a single finding, which only applies to one project version (and every environment and PR is a separate version).
 
 Example: setuptools cannot be upgraded to a fixed version (>= 84.1.0) because of pyramid, and its two advisories only apply to macOS and Windows, while we build and deploy on Linux:
 

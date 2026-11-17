@@ -7,6 +7,7 @@ const scoreScript = extractScript('dependency-track.yml', 'score');
 const issuesScript = extractScript('dependency-track.yml', 'issues');
 const sentryScript = extractScript('dependency-track.yml', 'sentry');
 const frontendScript = extractScript('dependency-track.yml', 'frontend-sbom');
+const targetsScript = extractScript('dependency-track.yml', 'targets');
 
 // Impact 5, exposure 3: Risicoscore = 5 x (CVSS weight + exploitability + 3).
 const SCORE_ENV = { ICR_B: '5', ICR_I: '2', ICR_C: '1', EXPOSURE: '3', EPSS_THRESHOLD: '0.1' };
@@ -214,6 +215,16 @@ test('reopens a completed issue on a scheduled run, but not on a pull request', 
   assert.ok(!pr.github.calls.createIssue.some((i) => i.title.startsWith('Update lodash')));
 });
 
+test('links no Dependency-Track project for a throwaway PR version', async () => {
+  const dir = makeRepo({ 'dt-findings.json': findingsFile().replace('"https://dt/projects/p"', 'null') });
+  await runScript(scoreScript, { dir, github: mockGithub(), env: SCORE_ENV });
+  const github = mockGithub();
+  await runScript(issuesScript, { dir, github, env: { ...ISSUE_ENV, IS_PR: 'true', REF_NAME: 'PR #5' } });
+  const body = github.calls.createIssue[0].body;
+  assert.match(body, /on PR #5\. This description/);
+  assert.doesNotMatch(body, /Dependency-Track\]\(null\)/);
+});
+
 test('accepts labels that already exist', async () => {
   const { failures, github } = await issues({ existingLabels: ['security', 'dependencies', 'backend', 'frontend'] });
   assert.deepEqual(failures, []);
@@ -227,7 +238,8 @@ const SENTRY_ENV = {
   TICKET_LABELS: 'security,dependencies',
   VERSION: '1.4.2',
   REPOSITORY: 'OnroerendErfgoed/demo',
-  REF_NAME: 'master',
+  ENVIRONMENT: 'prod',
+  REF_NAME: 'prod (1.4.2 at abcdef1)',
   REPO_URL: 'https://github.com/OnroerendErfgoed/demo',
   RUN_URL: 'https://github.com/o/r/actions/runs/1',
 };
@@ -243,7 +255,7 @@ async function sentry(env = {}) {
   };
 }
 
-test('builds one Sentry event per repository from the findings at fail-level', async () => {
+test('builds one Sentry event per repository and environment from the findings at fail-level', async () => {
   const { outputs, failures, url, envelope, secrets } = await sentry();
   assert.deepEqual(failures, []);
   assert.equal(outputs.send, 'true');
@@ -254,9 +266,10 @@ test('builds one Sentry event per repository from the findings at fail-level', a
   assert.match(event.event_id, /^[0-9a-f]{32}$/);
   assert.deepEqual(item, { type: 'event' });
   assert.equal(event.level, 'fatal');
-  assert.deepEqual(event.fingerprint, ['dependency-track', 'OnroerendErfgoed/demo']);
-  assert.equal(event.message.formatted, 'OnroerendErfgoed/demo: Kritiek, Risicoscore 45 (2 findings in 2 libraries)');
-  assert.equal(event.environment, 'master');
+  assert.deepEqual(event.fingerprint, ['dependency-track', 'OnroerendErfgoed/demo', 'prod']);
+  assert.equal(event.message.formatted, 'OnroerendErfgoed/demo prod: Kritiek, Risicoscore 45 (2 findings in 2 libraries)');
+  assert.equal(event.environment, 'prod');
+  assert.equal(event.contexts.dependency_track.scanned, 'prod (1.4.2 at abcdef1)');
   assert.equal(event.release, '1.4.2');
   assert.deepEqual(event.tags, { repository: 'OnroerendErfgoed/demo', max_level: 'Kritiek', max_risk: '45', tier: 'backend,frontend' });
   assert.equal(event.contexts.dependency_track.issues,
@@ -271,7 +284,7 @@ test('includes Hoog findings in the Sentry event when fail-level is Hoog', async
   const event = envelope[2];
   assert.equal(event.level, 'fatal');
   assert.equal(event.extra.findings.length, 4);
-  assert.equal(event.message.formatted, 'OnroerendErfgoed/demo: Kritiek, Risicoscore 45 (4 findings in 3 libraries)');
+  assert.equal(event.message.formatted, 'OnroerendErfgoed/demo prod: Kritiek, Risicoscore 45 (4 findings in 3 libraries)');
 });
 
 test('keeps a path prefix of the Sentry DSN', async () => {
@@ -328,4 +341,129 @@ test('combines the frontends into one SBOM: build packages and lockfile componen
   const pyoes = bom.components[1];
   assert.deepEqual(pyoes, { type: 'library', 'bom-ref': pyoes.purl, name: '@OnroerendErfgoed/pyoes', version: '0.26.2', purl: pyoes.purl });
   assert.equal(bom.components[0].name, '@aurelia/binding');
+});
+
+// In-memory Dependency-Track: projects { uuid: { name, version, parent?, properties: [] } }.
+function fakeDt(projects = {}) {
+  const calls = [];
+  const json = (status, body) => new Response(body === undefined ? null : JSON.stringify(body), { status });
+  const fetch = async (url, { method, body }) => {
+    const u = new URL(url);
+    const path = u.pathname.replace(/^\/api/, '');
+    const data = body ? JSON.parse(body) : undefined;
+    calls.push([method, path, data]);
+    const withVersions = (uuid) => ({
+      uuid,
+      ...projects[uuid],
+      // Only GET /v1/project/{uuid} is relied on for the versions.
+      versions: Object.entries(projects).filter(([, p]) => p.name === projects[uuid].name).map(([id, p]) => ({ uuid: id, version: p.version })),
+    });
+    let m;
+    if (method === 'GET' && path === '/v1/project/lookup') {
+      const uuid = Object.keys(projects).find((id) => projects[id].name === u.searchParams.get('name') && projects[id].version === u.searchParams.get('version'));
+      return uuid ? json(200, withVersions(uuid)) : json(404);
+    }
+    if (method === 'PUT' && path === '/v1/project') {
+      const uuid = `p${Object.keys(projects).length + 1}`;
+      projects[uuid] = { ...data, properties: [] };
+      return json(201, withVersions(uuid));
+    }
+    if ((m = path.match(/^\/v1\/project\/([^/]+)\/property$/))) {
+      const props = projects[m[1]].properties;
+      const find = () => props.find((p) => p.groupName === data.groupName && p.propertyName === data.propertyName);
+      if (method === 'GET') return json(200, props);
+      if (method === 'PUT') { if (find()) return json(409); props.push(data); return json(201, data); }
+      if (method === 'POST') { find().propertyValue = data.propertyValue; return json(200, find()); }
+      if (method === 'DELETE') { props.splice(props.indexOf(find()), 1); return json(204); }
+    }
+    if ((m = path.match(/^\/v1\/project\/([^/]+)\/children$/))) {
+      return json(200, Object.entries(projects).filter(([, p]) => p.parent === m[1]).map(([uuid, p]) => ({ uuid, ...p })));
+    }
+    if ((m = path.match(/^\/v1\/project\/([^/]+)$/))) {
+      if (method === 'GET') return projects[m[1]] ? json(200, withVersions(m[1])) : json(404);
+      if (method === 'PATCH') { Object.assign(projects[m[1]], data); return json(200, projects[m[1]]); }
+      if (method === 'DELETE') { delete projects[m[1]]; return json(204); }
+    }
+    return json(500, { unexpected: `${method} ${path}` });
+  };
+  return { projects, calls, fetch };
+}
+
+const deployProps = (sha, ref) => [
+  { groupName: 'deploy', propertyName: 'sha', propertyValue: sha },
+  { groupName: 'deploy', propertyName: 'ref', propertyValue: ref },
+  { groupName: 'deploy', propertyName: 'version', propertyValue: '1.0.0' },
+];
+
+async function targets(dt, { env = {}, pullRequest, branches = ['master'], commits = {}, prs = {} } = {}) {
+  const github = mockGithub();
+  const notFound = () => Object.assign(new Error('Not Found'), { status: 404 });
+  github.rest.repos.getBranch = async ({ branch }) => { if (!branches.includes(branch)) throw notFound(); return { data: { name: branch } }; };
+  github.rest.repos.getCommit = async ({ ref }) => { if (!commits[ref]) throw Object.assign(new Error('No commit'), { status: 422 }); return { data: { sha: commits[ref] } }; };
+  github.rest.pulls = { get: async ({ pull_number: n }) => { if (!prs[n]) throw notFound(); return { data: { state: prs[n] } }; } };
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = dt.fetch;
+  try {
+    const result = await runScript(targetsScript, {
+      dir: makeRepo({}),
+      github,
+      pullRequest,
+      env: {
+        DT_URL: 'https://dt', DT_TOKEN: 't', PROJECT: 'demo', EVENT: 'schedule', ENVIRONMENT: '', REF: '', REF_NAME: 'develop',
+        ACTOR: 'dev1', RUN_URL: 'https://github.com/o/r/actions/runs/1', ...env,
+      },
+    });
+    return { ...result, targets: JSON.parse(result.outputs.targets) };
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+}
+
+test('scans a pull request in a throwaway version that creates issues', async () => {
+  const { targets: t } = await targets(fakeDt(), { env: { EVENT: 'pull_request' }, pullRequest: { number: 12 } });
+  assert.deepEqual(t, [{ environment: 'pr-12', checkout: '', ref: '', label: 'PR #12', deploy: false, issues: true, throwaway: true, latest: false }]);
+});
+
+test('records a deployment on the environment and scans the deployed commit', async () => {
+  const dt = fakeDt({ p1: { name: 'demo', version: 'test', properties: deployProps('a'.repeat(40), 'old') } });
+  const { targets: t } = await targets(dt, { env: { EVENT: 'workflow_dispatch', ENVIRONMENT: 'test', REF: 'feature/x' }, commits: { 'feature/x': 'b'.repeat(40) } });
+  assert.deepEqual(t, [{ environment: 'test', checkout: 'b'.repeat(40), ref: 'feature/x', label: 'test (feature/x at bbbbbbb)', deploy: true, issues: false, throwaway: false, latest: false }]);
+  const props = Object.fromEntries(dt.projects.p1.properties.map((p) => [p.propertyName, p.propertyValue]));
+  assert.equal(props.sha, 'b'.repeat(40));
+  assert.equal(props.ref, 'feature/x');
+  assert.equal(props.by, 'dev1');
+  assert.equal(props.run, 'https://github.com/o/r/actions/runs/1');
+  assert.ok(!('version' in props), 'the old version is removed until the scan knows the new one');
+  assert.match(dt.projects.p1.description, /^Deployed feature\/x \(bbbbbbb\) on \d{4}-\d\d-\d\d \d\d:\d\d UTC by dev1; scan pending$/);
+});
+
+test('creates the environment version on its first deployment, marked latest for prod', async () => {
+  const dt = fakeDt();
+  const { targets: t } = await targets(dt, { env: { EVENT: 'workflow_dispatch', ENVIRONMENT: 'prod', REF: '2.0.0' }, commits: { '2.0.0': 'c'.repeat(40) } });
+  assert.equal(t[0].issues, true);
+  assert.equal(t[0].latest, true);
+  assert.deepEqual(dt.calls.find(([m, p]) => m === 'PUT' && p === '/v1/project')[2],
+    { name: 'demo', version: 'prod', classifier: 'APPLICATION', isLatest: true });
+});
+
+test('rejects an unknown environment or ref', async () => {
+  await assert.rejects(targets(fakeDt(), { env: { ENVIRONMENT: 'staging' } }), /environment must be dev, test, prod or empty/);
+  await assert.rejects(targets(fakeDt(), { env: { ENVIRONMENT: 'dev', REF: 'nope' } }), /'nope' is no branch, tag or commit/);
+  await assert.rejects(targets(fakeDt(), { env: { ENVIRONMENT: 'dev' } }), /No deployment recorded for dev/);
+});
+
+test('nightly: scans each recorded deployment, prod falls back to master, deletes versions of closed PRs', async () => {
+  const dt = fakeDt({
+    p1: { name: 'demo', version: 'dev', properties: deployProps('d'.repeat(40), 'feature/y') },
+    p2: { name: 'demo', version: 'pr-3', properties: [] },
+    p3: { name: 'demo-backend', version: 'pr-3', parent: 'p2', properties: [] },
+    p4: { name: 'demo', version: 'pr-4', properties: [] },
+  });
+  const { targets: t, warnings } = await targets(dt, { prs: { 3: 'closed', 4: 'open' } });
+  assert.deepEqual(t.map((x) => [x.environment, x.checkout, x.label, x.issues]), [
+    ['dev', 'd'.repeat(40), 'dev (feature/y at ddddddd)', false],
+    ['prod', 'master', 'prod (master, no deployment recorded)', true],
+  ]);
+  assert.match(warnings[0], /No deployment recorded for prod: scanning master/);
+  assert.deepEqual(Object.keys(dt.projects).sort(), ['p1', 'p4']);
 });

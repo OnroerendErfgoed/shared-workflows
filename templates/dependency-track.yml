@@ -1,34 +1,49 @@
 # Caller for the shared Dependency-Track scan. Copy to .github/workflows/ in a project repo
 # and fill in the app's ICR3.0 classification and exposure.
 #
-# On every PR to main/master and every night, SBOMs of the backend (and frontends) go to
-# Dependency-Track and every finding gets a Risicoscore. Libraries with Hoog or Kritiek findings
-# get one GitHub issue each; the job fails when a finding reaches fail-level, and the nightly
-# run then alerts Sentry.
+# Dependency-Track keeps one version of the app per environment (dev, test, prod) with the code
+# deployed there:
+# - the deploy tool runs this workflow with environment and ref, which records the deployment
+#   and scans it:  gh workflow run dependency-track.yml -f environment=prod -f ref=2.14.0
+# - every night, the deployment recorded for each environment is scanned again;
+# - every PR to main/master is scanned in a throwaway version.
+# Every finding gets a Risicoscore. PRs and prod get one GitHub issue per library with Hoog or
+# Kritiek findings; a finding at fail-level fails the job and, outside PRs, alerts Sentry.
+#
+# Keep this file on the default branch: the deploy and the nightly run start there and check out
+# the deployed commit themselves, so older tags without this file can be scanned too.
 name: Dependency-Track
 
 on:
   pull_request:
     branches: [main, master]
   schedule:
-    - cron: '17 3 * * *' # nightly; scans main/master, also when the default branch is develop
+    - cron: '17 3 * * *' # nightly: the deployment recorded for each environment
   workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment just deployed to (dev, test or prod); empty scans every environment
+        type: string
+        default: ""
+      ref:
+        description: Branch, tag or commit deployed; empty rescans the recorded deployment
+        type: string
+        default: ""
 
 permissions: {}
 
-concurrency:
-  group: dependency-track-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   dependency-track:
-    uses: OnroerendErfgoed/shared-workflows/.github/workflows/dependency-track.yml@v1
+    uses: OnroerendErfgoed/shared-workflows/.github/workflows/dependency-track.yml@v2
     permissions:
       contents: read
       id-token: write
       issues: write
       packages: read
+      pull-requests: read
     with:
+      environment: ${{ inputs.environment }}
+      ref: ${{ inputs.ref }}
       icr-b: 3 # ICR3.0 Beschikbaarheid 1-5
       icr-i: 3 # ICR3.0 Integriteit 1-5
       icr-c: 3 # ICR3.0 Confidentialiteit 1-5

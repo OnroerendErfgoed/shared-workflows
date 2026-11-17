@@ -7,21 +7,41 @@ name: Dependency-Track
 #   Risicoscore = Impact x (CVSS weight + Exploitability + Exposure)
 #   Impact = max(ICR B, I, C)   Laag-middel <= 20, Hoog 21-35, Kritiek >= 36
 #
-# Run it on pull requests (version: the PR's source branch) and on a schedule on main/master
-# (version: the app version in pyproject.toml, marked latest). Both create or update one
-# GitHub issue per vulnerable library, and fail the job when a finding reaches fail-level.
-# Scheduled and manual runs also send that failure to Sentry when the caller passes sentry-dsn.
+# Dependency-Track holds one version of the project per environment (dev, test, prod), with the
+# code deployed there. What runs when:
+#
+# - Deploy: the deploy tool dispatches the caller with environment and ref. The job records the
+#   deployment on <project> <environment> (properties deploy/*, and the description) and scans
+#   that ref.
+# - Nightly (schedule, or a dispatch without environment): scans the commit recorded for each
+#   environment. An environment without a recorded deployment is skipped, except prod, which
+#   then scans main/master.
+# - Pull request: scans the PR in a throwaway version pr-<number>, deleted when the job ends.
+#
+# Pull requests and prod create or update one GitHub issue per vulnerable library. Every
+# environment sends findings at fail-level to Sentry (with the sentry-dsn secret); pull requests
+# fail instead.
 #
 # No API key: the job exchanges its GitHub OIDC token for a short-lived Dependency-Track session
 # (workload identity federation, Dependency-Track 5.2+); see the README for the server setup.
 #
 # Triggers stay in the calling workflow.
-# The calling job must grant `contents: read`, `id-token: write`, `issues: write` and
-# `packages: read`.
+# The calling job must grant `contents: read`, `id-token: write`, `issues: write`,
+# `packages: read` and `pull-requests: read`.
 
 on:
   workflow_call:
     inputs:
+      environment:
+        description: >-
+          Environment that was just deployed: dev, test or prod. With ref, records the deployment
+          and scans it; without, rescans its recorded deployment. Empty: every environment (nightly).
+        type: string
+        default: ""
+      ref:
+        description: Branch, tag or commit deployed to environment.
+        type: string
+        default: ""
       runs-on:
         description: Runner label, or a JSON list of labels (e.g. '["self-hosted", "linux"]').
         type: string
@@ -47,11 +67,11 @@ on:
         type: string
         default: "0.1"
       fail-level:
-        description: "Fail the job when a finding reaches this level: Kritiek, Hoog or none."
+        description: "Fail the job and alert Sentry when a finding reaches this level: Kritiek, Hoog or none."
         type: string
         default: Kritiek
       ticket-level:
-        description: "Create or update an issue per library with findings from this level: Kritiek, Hoog, Laag-middel or none."
+        description: "Create or update an issue per library with findings from this level (pull requests and prod): Kritiek, Hoog, Laag-middel or none."
         type: string
         default: Hoog
       ticket-labels:
@@ -60,10 +80,6 @@ on:
         default: security,dependencies
       project-name:
         description: Parent project in Dependency-Track; the SBOMs go to <name>-backend and <name>-frontend. Defaults to the repository name.
-        type: string
-        default: ""
-      project-version:
-        description: Version in Dependency-Track. Defaults to the source branch on pull requests, the version in pyproject.toml on main/master, else the branch or tag name.
         type: string
         default: ""
       backend-directory:
@@ -119,18 +135,211 @@ on:
       npm-token:
         description: Token for registry.npmjs.org, for private packages there (e.g. @govflanders).
         required: false
-    outputs:
-      max-risk:
-        description: Highest Risicoscore of all findings (0 without findings).
-        value: ${{ jobs.scan.outputs.max-risk }}
-      max-level:
-        description: Level of the highest finding (Kritiek, Hoog, Laag-middel or none).
-        value: ${{ jobs.scan.outputs.max-level }}
 
 permissions: {}
 
+env:
+  DT_URL: https://${{ inputs.server-hostname || vars.DEPENDENCY_TRACK_HOSTNAME || 'test-dependencytrack.onroerenderfgoed.be' }}
+  PROJECT: ${{ inputs.project-name || github.event.repository.name }}
+
 jobs:
+  # Decides what to scan: one target per environment (or the PR), with the commit to check out.
+  # A deploy is recorded here, before any SBOM is built, so a failing scan never loses it.
+  plan:
+    runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: read # resolve the deployed ref, find main/master, check PR states
+      id-token: write # GitHub OIDC token, exchanged for a Dependency-Track session
+      pull-requests: read
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Dependency-Track session
+        env:
+          PROVIDER: ${{ inputs.workload-identity-provider }}
+          SERVICE_ACCOUNT: ${{ inputs.service-account }}
+        run: |
+          audience=$(python3 -c 'import os, urllib.parse; print(urllib.parse.quote(os.environ["DT_URL"], safe=""))')
+          id_token=$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | python3 -c 'import json, sys; print(json.load(sys.stdin)["value"])')
+          response=$(curl -sS -w '\n%{http_code}' "$DT_URL/api/v2/oauth/token" \
+            --data-urlencode grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+            --data-urlencode subject_token_type=urn:ietf:params:oauth:token-type:jwt \
+            --data-urlencode "subject_token=$id_token" \
+            --data-urlencode "workload_identity_provider=$PROVIDER" \
+            --data-urlencode "service_account=$SERVICE_ACCOUNT")
+          if [ "$(tail -n1 <<< "$response")" != 200 ]; then
+            echo "::error::Token exchange at $DT_URL failed: $(sed '$d' <<< "$response")"
+            echo "Check the workload identity provider '$PROVIDER' (audience $DT_URL) and a binding on '$SERVICE_ACCOUNT' for this repository."
+            exit 1
+          fi
+          token=$(sed '$d' <<< "$response" | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])')
+          echo "::add-mask::$token"
+          echo "DT_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Targets
+        id: targets
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          # fetch() ignores HTTPS_PROXY unless asked (Node 24); self-hosted runners need the proxy
+          NODE_USE_ENV_PROXY: "1"
+          EVENT: ${{ github.event_name }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          REF: ${{ inputs.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const { DT_URL: dt, DT_TOKEN: token, PROJECT: project } = process.env;
+            const ENVIRONMENTS = ['dev', 'test', 'prod'];
+
+            const call = async (method, path, body) => {
+              const res = await fetch(`${dt}/api${path}`, {
+                method,
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: body === undefined ? undefined : JSON.stringify(body),
+              });
+              const text = await res.text();
+              if (res.status === 404 && method === 'GET') return null;
+              if (!res.ok) {
+                const hint = res.status === 403 ? ' (see the README for the permissions of the service account)' : '';
+                throw new Error(`${method} ${path}: HTTP ${res.status} ${text.slice(0, 300)}${hint}`);
+              }
+              return text ? JSON.parse(text) : null;
+            };
+            const lookup = (version) => call('GET', `/v1/project/lookup?${new URLSearchParams({ name: project, version })}`);
+            const properties = async (uuid) => Object.fromEntries(((await call('GET', `/v1/project/${uuid}/property`)) ?? [])
+              .filter((p) => p.groupName === 'deploy').map((p) => [p.propertyName, p.propertyValue]));
+            const short = (sha) => sha.slice(0, 7);
+
+            // Each target is one job of the scan matrix.
+            const target = (environment, extra) => ({
+              environment, // Dependency-Track version, Sentry environment
+              checkout: '', // commit or branch to scan; empty: the ref of the event
+              ref: '',
+              label: environment, // where the findings were seen, in issues and Sentry
+              deploy: false, // record the app version and the description after the scan
+              issues: environment === 'prod',
+              throwaway: false,
+              latest: environment === 'prod',
+              ...extra,
+            });
+            const recorded = (environment, d) => target(environment,
+              { checkout: d.sha, ref: d.ref, label: `${environment} (${d.ref} at ${short(d.sha)})` });
+
+            // A schedule fires from the default branch, which is develop in some repositories; prod
+            // without a recorded deployment runs main or master. The API redirects a renamed branch
+            // (e.g. master renamed to develop), so compare the name.
+            const productionBranch = async () => {
+              for (const branch of ['master', 'main']) {
+                try {
+                  const { data } = await github.rest.repos.getBranch({ owner, repo, branch });
+                  if (data.name === branch) return branch;
+                } catch (e) {
+                  if (e.status !== 404) throw e;
+                }
+              }
+              return null;
+            };
+
+            const deleteProject = async (p) => {
+              for (const child of (await call('GET', `/v1/project/${p.uuid}/children`)) ?? []) await deleteProject(child);
+              await call('DELETE', `/v1/project/${p.uuid}`);
+            };
+
+            const targets = [];
+            const parents = {};
+            if (process.env.EVENT === 'pull_request') {
+              const number = context.payload.pull_request.number;
+              targets.push(target(`pr-${number}`, { label: `PR #${number}`, issues: true, throwaway: true }));
+            } else if (process.env.ENVIRONMENT) {
+              const environment = process.env.ENVIRONMENT;
+              if (!ENVIRONMENTS.includes(environment)) {
+                throw new Error(`environment must be ${ENVIRONMENTS.join(', ')} or empty, got '${environment}'`);
+              }
+              const ref = process.env.REF;
+              let parent = await lookup(environment);
+              if (ref) {
+                let sha;
+                try {
+                  ({ data: { sha } } = await github.rest.repos.getCommit({ owner, repo, ref }));
+                } catch (e) {
+                  if (e.status === 404 || e.status === 422) throw new Error(`'${ref}' is no branch, tag or commit of ${owner}/${repo}`);
+                  throw e;
+                }
+                if (!parent) {
+                  parent = await call('PUT', '/v1/project',
+                    { name: project, version: environment, classifier: 'APPLICATION', isLatest: environment === 'prod' });
+                }
+                const record = { ref, sha, time: new Date().toISOString(), by: process.env.ACTOR, run: process.env.RUN_URL };
+                const current = await properties(parent.uuid);
+                for (const [name, value] of Object.entries(record)) {
+                  if (!(name in current)) {
+                    await call('PUT', `/v1/project/${parent.uuid}/property`,
+                      { groupName: 'deploy', propertyName: name, propertyValue: value, propertyType: name === 'run' ? 'URL' : 'STRING' });
+                  } else if (current[name] !== value) {
+                    await call('POST', `/v1/project/${parent.uuid}/property`, { groupName: 'deploy', propertyName: name, propertyValue: value });
+                  }
+                }
+                // The previous deploy's version and description no longer apply.
+                if ('version' in current) {
+                  await call('DELETE', `/v1/project/${parent.uuid}/property`, { groupName: 'deploy', propertyName: 'version' });
+                }
+                await call('PATCH', `/v1/project/${parent.uuid}`,
+                  { description: `Deployed ${ref} (${short(sha)}) on ${record.time.slice(0, 16).replace('T', ' ')} UTC by ${record.by}; scan pending` });
+                core.info(`Recorded the deployment of ${ref} (${sha}) to ${environment}`);
+                targets.push(target(environment, { checkout: sha, ref, deploy: true, label: `${environment} (${ref} at ${short(sha)})` }));
+              } else {
+                const d = parent && await properties(parent.uuid);
+                if (!d?.sha) throw new Error(`No deployment recorded for ${environment}: pass the deployed ref`);
+                targets.push(recorded(environment, d));
+              }
+            } else {
+              for (const environment of ENVIRONMENTS) {
+                const parent = await lookup(environment);
+                if (parent) parents[environment] = parent;
+                const d = parent && await properties(parent.uuid);
+                if (d?.sha) {
+                  targets.push(recorded(environment, d));
+                } else if (environment === 'prod') {
+                  const branch = await productionBranch();
+                  core.warning(`No deployment recorded for prod: scanning ${branch ?? process.env.REF_NAME}`);
+                  targets.push(target(environment, { checkout: branch ?? '', ref: branch ?? process.env.REF_NAME,
+                    label: `prod (${branch ?? process.env.REF_NAME}, no deployment recorded)` }));
+                } else {
+                  core.info(`${environment}: no deployment recorded, nothing to scan`);
+                }
+              }
+
+              // A cancelled PR run can leave its throwaway version behind: delete those of PRs
+              // that are no longer open.
+              const any = Object.values(parents)[0];
+              const versions = any ? (await call('GET', `/v1/project/${any.uuid}`))?.versions ?? [] : [];
+              for (const { uuid, version } of versions) {
+                const match = /^pr-(\d+)$/.exec(version ?? '');
+                if (!match) continue;
+                const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: Number(match[1]) })
+                  .catch((e) => (e.status === 404 ? { data: { state: 'gone' } } : Promise.reject(e)));
+                if (pr.state === 'open') continue;
+                await deleteProject({ uuid });
+                core.info(`Deleted the leftover version ${version}`);
+              }
+            }
+
+            for (const t of targets) core.info(`${t.environment}: ${t.checkout || 'the ref of the event'}`);
+            core.setOutput('targets', JSON.stringify(targets));
+
   scan:
+    needs: plan
+    name: scan (${{ matrix.target.environment }})
     runs-on: ${{ startsWith(inputs.runs-on, '[') && fromJSON(inputs.runs-on) || inputs.runs-on }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
@@ -138,90 +347,46 @@ jobs:
       id-token: write # GitHub OIDC token, exchanged for a Dependency-Track session
       issues: write # one issue per vulnerable library
       packages: read # @OnroerendErfgoed frontend packages on GitHub Packages
-    outputs:
-      max-risk: ${{ steps.score.outputs.max-risk }}
-      max-level: ${{ steps.score.outputs.max-level }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.plan.outputs.targets) }}
+    # One scan per environment at a time, so a deploy and the nightly run do not interleave
+    # their uploads; a new push to a PR cancels the scan of the previous one.
+    concurrency:
+      group: dependency-track-${{ matrix.target.environment }}
+      cancel-in-progress: ${{ matrix.target.throwaway }}
 
     defaults:
       run:
         shell: bash
 
     env:
-      DT_URL: https://${{ inputs.server-hostname || vars.DEPENDENCY_TRACK_HOSTNAME || 'test-dependencytrack.onroerenderfgoed.be' }}
-      PROJECT: ${{ inputs.project-name || github.event.repository.name }}
       FRONTEND_DIRS: ${{ inputs.frontend-directories }}
+      ENVIRONMENT: ${{ matrix.target.environment }}
 
     steps:
-      # Scheduled runs always scan main or master, also in repositories whose default branch is
-      # develop: a schedule fires from the default branch, but production runs main/master.
-      # Pull requests and manual runs scan their own ref.
-      - name: Branch to scan
-        id: branch
-        env:
-          EVENT: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          REPO: ${{ github.repository }}
-          API_URL: ${{ github.api_url }}
-          TOKEN: ${{ github.token }}
-        run: |
-          name=$REF_NAME
-          ref=
-          if [ "$EVENT" = schedule ] && [ "$REF_NAME" != main ] && [ "$REF_NAME" != master ]; then
-            # The API redirects a renamed branch (e.g. master renamed to develop), so compare the name
-            for branch in master main; do
-              found=$(curl -fsL -H "Authorization: Bearer $TOKEN" "$API_URL/repos/$REPO/branches/$branch" |
-                python3 -c 'import json, sys; print(json.load(sys.stdin)["name"])' 2> /dev/null || true)
-              if [ "$found" = "$branch" ]; then
-                name=$branch
-                ref=$branch
-                break
-              fi
-            done
-            if [ -z "$ref" ]; then
-              echo "::warning::No main or master branch; scanning $REF_NAME"
-            fi
-          fi
-          echo "name=$name" >> "$GITHUB_OUTPUT"
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "Scanning $name"
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.branch.outputs.ref }}
+          ref: ${{ matrix.target.checkout }}
           persist-credentials: false
 
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
-      # On main/master (also the nightly run in a develop-default repository): the app version
-      # declared in pyproject.toml, marked latest. On a PR: the source branch, so every push to the
-      # PR updates the same version. Elsewhere: the branch or tag name.
-      - name: Project version
+      # The app version declared in pyproject.toml, for the deploy record and the Sentry release.
+      - name: App version
         id: version
         working-directory: ${{ inputs.backend-directory }}
-        env:
-          VERSION: ${{ inputs.project-version }}
-          HEAD_REF: ${{ github.head_ref }}
-          REF_NAME: ${{ steps.branch.outputs.name }}
         run: |
-          latest=false
-          if [ -n "$HEAD_REF" ]; then
-            VERSION="${VERSION:-$HEAD_REF}"
-          elif [ "$REF_NAME" = main ] || [ "$REF_NAME" = master ]; then
-            latest=true
-            if [ -z "$VERSION" ] && [ -f pyproject.toml ]; then
-              VERSION=$(uv run --no-project --quiet python -c '
+          version=
+          if [ -f pyproject.toml ]; then
+            version=$(uv run --no-project --quiet python -c '
           import tomllib
           d = tomllib.load(open("pyproject.toml", "rb"))
           print(d.get("project", {}).get("version") or d.get("tool", {}).get("poetry", {}).get("version") or "")')
-            fi
-            if [ -z "$VERSION" ]; then
-              echo "::warning::No version in pyproject.toml; using the branch name"
-            fi
           fi
-          VERSION="${VERSION:-$REF_NAME}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "latest=$latest" >> "$GITHUB_OUTPUT"
-          echo "Project: $PROJECT $VERSION (latest: $latest)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Project: $PROJECT $ENVIRONMENT, app version ${version:-unknown}"
 
       - name: Backend SBOM
         working-directory: ${{ inputs.backend-directory }}
@@ -469,7 +634,7 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           WORK: ${{ runner.temp }}/frontends
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ matrix.target.environment }}
         with:
           script: |
             const fs = require('fs');
@@ -536,18 +701,27 @@ jobs:
 
       # Creates the parent project if needed, uploads the SBOMs as its children, waits for the
       # analysis and saves every finding to $RUNNER_TEMP/dt-findings.json for the score step.
+      # Outside pull requests it also keeps the parent's risk/* properties (the scoring inputs, so
+      # the server SBOMs of the environment can be scored the same way) and, after a deploy,
+      # completes the deploy record with the app version and the description.
       - name: Upload and analyse
         env:
-          VERSION: ${{ steps.version.outputs.version }}
-          IS_LATEST: ${{ steps.version.outputs.latest }}
+          TARGET: ${{ toJSON(matrix.target) }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          ICR_B: ${{ inputs.icr-b }}
+          ICR_I: ${{ inputs.icr-i }}
+          ICR_C: ${{ inputs.icr-c }}
+          EXPOSURE: ${{ inputs.exposure }}
+          EPSS_THRESHOLD: ${{ inputs.epss-threshold }}
         run: |
           python3 - <<'PY'
-          import json, os, sys, time, uuid
+          import datetime, json, os, sys, time, uuid
           import urllib.error, urllib.parse, urllib.request
 
           dt, token = os.environ["DT_URL"], os.environ["DT_TOKEN"]
-          project, version = os.environ["PROJECT"], os.environ["VERSION"]
-          is_latest = os.environ["IS_LATEST"] == "true"
+          target = json.loads(os.environ["TARGET"])
+          project, version = os.environ["PROJECT"], target["environment"]
+          is_latest = target["latest"]
           temp = os.environ["RUNNER_TEMP"]
 
           def call(method, path, body=None, content_type="application/json", headers=False):
@@ -561,9 +735,19 @@ jobs:
               except urllib.error.HTTPError as e:
                   if e.code == 404 and method == "GET":
                       return (None, e.headers) if headers else None
-                  hint = (" (the service account needs BOM_UPLOAD, PROJECT_CREATION_UPLOAD, VIEW_PORTFOLIO,"
-                          " VIEW_VULNERABILITY and PORTFOLIO_MANAGEMENT_CREATE)") if e.code == 403 else ""
+                  hint = " (see the README for the permissions of the service account)" if e.code == 403 else ""
                   sys.exit(f"::error::{method} {path}: HTTP {e.code} {e.read().decode()[:300]}{hint}")
+
+          def set_properties(uuid_, group, values):
+              """values: {name: (value, type)}; creates or updates only what differs."""
+              current = {p["propertyName"]: p.get("propertyValue")
+                         for p in call("GET", f"/v1/project/{uuid_}/property") or [] if p["groupName"] == group}
+              for name, (value, kind) in values.items():
+                  body = {"groupName": group, "propertyName": name, "propertyValue": value}
+                  if name not in current:
+                      call("PUT", f"/v1/project/{uuid_}/property", json.dumps(dict(body, propertyType=kind)).encode())
+                  elif current[name] != value:
+                      call("POST", f"/v1/project/{uuid_}/property", json.dumps(body).encode())
 
           def lookup(name):
               q = urllib.parse.urlencode({"name": name, "version": version})
@@ -613,8 +797,37 @@ jobs:
               projects.append({"label": label, "name": p["name"], "version": version,
                                "url": f"{dt}/projects/{p['uuid']}", "findings": findings})
               print(f"{label}: {len(findings)} findings")
-          json.dump({"parentUrl": f"{dt}/projects/{parent['uuid']}", "projects": projects},
-                    open(f"{temp}/dt-findings.json", "w"))
+
+          if not target["throwaway"]:
+              set_properties(parent["uuid"], "risk", {
+                  "icr-b": (os.environ["ICR_B"], "INTEGER"),
+                  "icr-i": (os.environ["ICR_I"], "INTEGER"),
+                  "icr-c": (os.environ["ICR_C"], "INTEGER"),
+                  "exposure": (os.environ["EXPOSURE"], "INTEGER"),
+                  "epss-threshold": (os.environ["EPSS_THRESHOLD"], "NUMBER"),
+              })
+          if target["deploy"]:
+              app_version = os.environ["APP_VERSION"]
+              if app_version:
+                  set_properties(parent["uuid"], "deploy", {"version": (app_version, "STRING")})
+              deployed = {p["propertyName"]: p.get("propertyValue")
+                          for p in call("GET", f"/v1/project/{parent['uuid']}/property") or [] if p["groupName"] == "deploy"}
+              raw = deployed.get("time")
+              when = (datetime.datetime.fromisoformat(raw.replace("Z", "+00:00")) if raw
+                      else datetime.datetime.now(datetime.timezone.utc))
+              try:
+                  from zoneinfo import ZoneInfo
+                  when = when.astimezone(ZoneInfo("Europe/Brussels"))
+              except Exception:
+                  pass
+              description = (f"Deployed {app_version or target['ref']} ({target['ref']} at {target['checkout'][:7]}) "
+                             f"on {when:%Y-%m-%d %H:%M %Z} by {deployed.get('by', '?')}")
+              call("PATCH", f"/v1/project/{parent['uuid']}", json.dumps({"description": description}).encode())
+              print(description)
+
+          # A throwaway version is gone after the job: link to nothing rather than to a 404.
+          parent_url = None if target["throwaway"] else f"{dt}/projects/{parent['uuid']}"
+          json.dump({"parentUrl": parent_url, "projects": projects}, open(f"{temp}/dt-findings.json", "w"))
           PY
 
       - name: Risk score
@@ -727,14 +940,14 @@ jobs:
             const exploit = (f) => [f.kev ? 'KEV' : null, f.epss !== null ? `EPSS ${Math.round(f.epss * 1000) / 1000}` : null]
               .filter(Boolean).join(', ');
             const lines = [
-              `### Dependency-Track: ${findings.length} findings`,
+              `### Dependency-Track, ${process.env.ENVIRONMENT}: ${findings.length} findings`,
               '',
               `Risicoscore = Impact ${impact} (max of ICR B/I/C) × (CVSS weight + exploitability + exposure ${exposure}); ` +
                 'CVSS weight <4.0: 1, 4.0-6.9: 2, 7.0-8.9: 3, >=9.0: 4; exploitability KEV: 3, ' +
                 `EPSS >= ${epssThreshold}: 2, else 1.`,
               '',
-              `Kritiek: ${count('Kritiek')}, Hoog: ${count('Hoog')}, Laag-middel: ${count('Laag-middel')}. ` +
-                `[Open in Dependency-Track](${input.parentUrl})`,
+              `Kritiek: ${count('Kritiek')}, Hoog: ${count('Hoog')}, Laag-middel: ${count('Laag-middel')}.` +
+                (input.parentUrl ? ` [Open in Dependency-Track](${input.parentUrl})` : ''),
             ];
             if (findings.length) {
               lines.push('', '| Risk | Calculation | Level | Component | Advisory | CVSS | Exploitability | Project |',
@@ -749,14 +962,14 @@ jobs:
 
       - name: Issues
         id: issues
-        if: inputs.ticket-level != 'none'
+        if: inputs.ticket-level != 'none' && matrix.target.issues
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TICKET_LEVEL: ${{ inputs.ticket-level }}
           TICKET_LABELS: ${{ inputs.ticket-labels }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          REF_NAME: "${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || steps.branch.outputs.name }}"
-          IS_PR: ${{ github.event_name == 'pull_request' }}
+          REF_NAME: ${{ matrix.target.label }}
+          IS_PR: ${{ matrix.target.throwaway }}
         with:
           script: |
             const fs = require('fs');
@@ -811,8 +1024,9 @@ jobs:
                 lines.push(`| ${f.risk} | ${f.level} | ${f.ids.map(link).join(' = ')} | ${f.cvss ?? f.severity ?? '?'} | ${exploit || '-'} |`);
               }
               lines.push('', `Risicoscore = Impact ${scored.impact} x (CVSS weight + exploitability + exposure ${scored.exposure}). ` +
-                `Last seen by [this run](${process.env.RUN_URL}) on ${process.env.REF_NAME}; ` +
-                `see [Dependency-Track](${scored.parentUrl}). This description is updated on every run.`);
+                `Last seen by [this run](${process.env.RUN_URL}) on ${process.env.REF_NAME}` +
+                (scored.parentUrl ? `; see [Dependency-Track](${scored.parentUrl})` : '') +
+                '. This description is updated on every run.');
               return lines.join('\n');
             };
 
@@ -882,10 +1096,10 @@ jobs:
               `left closed [${skipped}]`);
 
       # Not on pull requests: those fail the PR, which is alert enough. One Sentry issue per
-      # repository (the fingerprint); every run that fails adds an event to it.
+      # repository and environment (the fingerprint); every run that fails adds an event to it.
       - name: Sentry alert
         id: sentry
-        if: ${{ !cancelled() && steps.score.outcome == 'success' && github.event_name != 'pull_request' && inputs.fail-level != 'none' }}
+        if: ${{ !cancelled() && steps.score.outcome == 'success' && !matrix.target.throwaway && inputs.fail-level != 'none' }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           SENTRY_DSN: ${{ secrets.sentry-dsn }}
@@ -893,7 +1107,7 @@ jobs:
           TICKET_LABELS: ${{ inputs.ticket-labels }}
           VERSION: ${{ steps.version.outputs.version }}
           REPOSITORY: ${{ github.repository }}
-          REF_NAME: ${{ steps.branch.outputs.name }}
+          REF_NAME: ${{ matrix.target.label }}
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         with:
@@ -941,13 +1155,13 @@ jobs:
               logger: 'dependency-track',
               level: top.level === 'Kritiek' ? 'fatal' : 'error',
               message: {
-                formatted: `${process.env.REPOSITORY}: ${top.level}, Risicoscore ${top.risk} ` +
+                formatted: `${process.env.REPOSITORY} ${process.env.ENVIRONMENT}: ${top.level}, Risicoscore ${top.risk} ` +
                   `(${alerts.length} ${alerts.length === 1 ? 'finding' : 'findings'} in ` +
                   `${libraries} ${libraries === 1 ? 'library' : 'libraries'})`,
               },
-              fingerprint: ['dependency-track', process.env.REPOSITORY],
-              environment: process.env.REF_NAME,
-              release: process.env.VERSION,
+              fingerprint: ['dependency-track', process.env.REPOSITORY, process.env.ENVIRONMENT],
+              environment: process.env.ENVIRONMENT,
+              release: process.env.VERSION || undefined,
               tags: {
                 repository: process.env.REPOSITORY,
                 max_level: top.level,
@@ -961,6 +1175,7 @@ jobs:
                   fail_level: process.env.FAIL_LEVEL,
                   impact: scored.impact,
                   exposure: scored.exposure,
+                  scanned: process.env.REF_NAME,
                   run: process.env.RUN_URL,
                   issues,
                   dependency_track: scored.parentUrl,
@@ -992,6 +1207,39 @@ jobs:
           else
             echo "::error::Sending the alert to Sentry failed: $response"
           fi
+
+      # Also when the job failed or was cancelled (a new push to the PR); a version that is left
+      # behind anyway is deleted by the nightly run once the PR is closed.
+      - name: Delete the throwaway version
+        if: ${{ always() && matrix.target.throwaway && env.DT_TOKEN != '' }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.error, urllib.parse, urllib.request
+
+          dt, token = os.environ["DT_URL"], os.environ["DT_TOKEN"]
+
+          def call(method, path):
+              req = urllib.request.Request(dt + "/api" + path, method=method, headers={"Authorization": f"Bearer {token}"})
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as r:
+                      data = r.read()
+                      return json.loads(data) if data else None
+              except urllib.error.HTTPError as e:
+                  if e.code == 404:
+                      return None
+                  raise SystemExit(f"::error::{method} {path}: HTTP {e.code} {e.read().decode()[:300]}")
+
+          def delete(uuid):
+              for child in call("GET", f"/v1/project/{uuid}/children") or []:
+                  delete(child["uuid"])
+              call("DELETE", f"/v1/project/{uuid}")
+
+          q = urllib.parse.urlencode({"name": os.environ["PROJECT"], "version": os.environ["ENVIRONMENT"]})
+          parent = call("GET", f"/v1/project/lookup?{q}")
+          if parent:
+              delete(parent["uuid"])
+              print(f"Deleted {os.environ['PROJECT']} {os.environ['ENVIRONMENT']}")
+          PY
 
       - name: Check fail level
         env:
