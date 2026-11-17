@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Breaking**, `dependency-track.yml` v2: Dependency-Track keeps one version per environment (`dev`, `test`, `prod`) instead of one per app version and PR branch. New inputs `environment` and `ref`: the deploy tool dispatches the caller with them, the job records the deployment on `<project> <environment>` (properties `deploy/ref`, `deploy/sha`, `deploy/time`, `deploy/by`, `deploy/run`, `deploy/version`, and the description) and scans it. The nightly run scans the commit recorded for each environment, in one job per environment; prod without a recorded deployment scans `main`/`master`. Pull requests are scanned in a throwaway version `pr-<number>`, deleted when the job ends (leftovers of closed PRs by the nightly run). Issues are created for PRs and prod only; Sentry alerts for every environment, with the environment in the message, `environment` and the fingerprint. Every scan outside PRs stores the scoring inputs as `risk/*` properties. Removed: the `project-version` input and the `max-risk`/`max-level` outputs. The caller needs `pull-requests: read` and the `workflow_dispatch` inputs of the template; the `github-ci` service account needs `PORTFOLIO_MANAGEMENT_READ`, `PORTFOLIO_MANAGEMENT_UPDATE` and `PORTFOLIO_MANAGEMENT_DELETE` besides its current permissions.
+
 ## 1.9.2 (2026-11-13)
 
 - `dependency-track.yml`: the nightly run always scans `main` or `master` (version from `pyproject.toml`, marked latest), also in repositories whose default branch is `develop`, where the schedule fires. A renamed branch the API redirects to is not mistaken for `master`.
