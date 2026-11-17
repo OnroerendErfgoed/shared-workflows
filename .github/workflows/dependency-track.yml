@@ -768,7 +768,12 @@ jobs:
                   for k, v in fields.items())
               body += (f'--{boundary}\r\nContent-Disposition: form-data; name="bom"; filename="bom.json"\r\n'
                        f"Content-Type: application/json\r\n\r\n").encode()
-              body += open(bom_file, "rb").read() + f"\r\n--{boundary}--\r\n".encode()
+              # Dependency-Track takes the project's classifier from metadata.component.type:
+              # the backend and frontend are libraries of the application (the parent).
+              bom = json.load(open(bom_file))
+              bom.setdefault("metadata", {})["component"] = dict(
+                  bom["metadata"].get("component") or {}, type="library", name=name, version=version)
+              body += json.dumps(bom).encode() + f"\r\n--{boundary}--\r\n".encode()
               return call("POST", "/v1/bom", body, f"multipart/form-data; boundary={boundary}")["token"]
 
           parts = [("backend", f"{temp}/backend.bom.json")]
