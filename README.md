@@ -127,6 +127,7 @@ Each issue is listed once, in the first category it matches. Empty categories ar
 | Category | Matches |
 | --- | --- |
 | 💥 Breaking changes | label `breaking` |
+| 🔒 Security | label `security` |
 | 🐛 Bugs | issue type `Bug`, or label `bug` / `fix` |
 | ✨ Features | issue type `Feature` or `Collection`, or label `enhancement` / `feature` |
 | 🧹 Other | everything else, including issue type `Task` |
@@ -289,11 +290,12 @@ There is no API key. The job exchanges its GitHub OIDC token for a short-lived D
 | `service-account` | string | `github-ci` | Service account in Dependency-Track. |
 | `timeout-minutes` | number | `30` | Per scan job. |
 
-Permissions: `contents: read`, `id-token: write`, `issues: write`, `packages: read`, `pull-requests: read` (the nightly run checks whether a leftover PR version's PR is closed). Secrets: `sentry-dsn` (optional), the DSN of the shared `dependency-track` project in Sentry, kept as the organization secret `DEPENDENCY_TRACK_SENTRY_DSN`:
+Permissions: `contents: read`, `id-token: write`, `issues: write`, `packages: read`, `pull-requests: read` (the nightly run checks whether a leftover PR version's PR is closed). Secrets: `sentry-dsn` (optional), the DSN of the shared `dependency-track` project in Sentry, kept as the organization secret `DEPENDENCY_TRACK_SENTRY_DSN`; `npm-token` (optional), a token for registry.npmjs.org for frontends with private packages there (e.g. `@govflanders`), as in `frontend-tests.yml`:
 
 ```yaml
     secrets:
       sentry-dsn: ${{ secrets.DEPENDENCY_TRACK_SENTRY_DSN }}
+      npm-token: ${{ secrets.NPM_GOV_FLANDERS }} # only for private npm packages
 ```
 
 In Sentry, an alert on that project (Monitors > Alerts) decides who hears about it: the triggers *a new issue is created* and *a resolved issue regresses* alert once per repo and environment, and again when it comes back after being resolved. Filter on the environment to route prod differently from dev and test.

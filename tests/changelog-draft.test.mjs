@@ -17,6 +17,7 @@ const github = () => mockGithub({
     { number: 13, title: 'Upgrade Python', labels: [], type: { name: 'Task' } },
     { number: 14, title: 'Docs bijwerken', labels: [], type: null },
     { number: 15, title: 'Zoeken op adres', labels: [{ name: 'enhancement' }] },
+    { number: 18, title: 'XSS in zoekveld', labels: [{ name: 'bug' }, { name: 'Security' }] },
     { number: 30, title: 'A PR, not an issue', labels: [], pull_request: {} },
   ],
   mergedPrs: [
@@ -43,6 +44,10 @@ const EXPECTED_SECTIONS = [
   '💥 Breaking changes',
   '',
   '- API endpoint verwijderd (#10)',
+  '',
+  '🔒 Security',
+  '',
+  '- XSS in zoekveld (#18)',
   '',
   '🐛 Bugs',
   '',
@@ -103,7 +108,7 @@ test('uses markdown headings one level deeper for categories in a markdown chang
 
   assert.deepEqual(failures, []);
   const changelog = read(dir, 'CHANGELOG.md');
-  assert.match(changelog, /^# Changelog\n\n## 1\.3\.0 \(\d{2}-\d{2}-\d{4}\)\n\n### 💥 Breaking changes\n\n- API endpoint verwijderd \(#10\)\n\n### 🐛 Bugs\n/);
+  assert.match(changelog, /^# Changelog\n\n## 1\.3\.0 \(\d{2}-\d{2}-\d{4}\)\n\n### 💥 Breaking changes\n\n- API endpoint verwijderd \(#10\)\n\n### 🔒 Security\n\n- XSS in zoekveld \(#18\)\n\n### 🐛 Bugs\n/);
   assert.match(changelog, /- Docs bijwerken \(#14\)\n\n## 1\.2\.0/);
 });
 

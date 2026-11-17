@@ -53,3 +53,4 @@ jobs:
       # backend-directory: backend # when pyproject.toml / uv.lock is not at the root
     secrets:
       sentry-dsn: ${{ secrets.DEPENDENCY_TRACK_SENTRY_DSN }} # organization secret
+      # npm-token: ${{ secrets.NPM_GOV_FLANDERS }} # for private npm packages such as @govflanders
