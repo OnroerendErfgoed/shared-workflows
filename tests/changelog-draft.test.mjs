@@ -18,6 +18,7 @@ const github = () => mockGithub({
     { number: 14, title: 'Docs bijwerken', labels: [], type: null },
     { number: 15, title: 'Zoeken op adres', labels: [{ name: 'enhancement' }] },
     { number: 18, title: 'XSS in zoekveld', labels: [{ name: 'bug' }, { name: 'Security' }] },
+    { number: 19, title: 'Deploy naar productie', labels: [{ name: 'bug' }], type: { name: 'Deploy' } },
     { number: 30, title: 'A PR, not an issue', labels: [], pull_request: {} },
   ],
   mergedPrs: [
@@ -35,6 +36,13 @@ const github = () => mockGithub({
     {
       number: 42, title: 'Bump dependencies', merged: true, baseRefName: 'develop', headRefName: 'chore/deps',
       closingIssuesReferences: { nodes: [] },
+    },
+    {
+      number: 43, title: 'Deploy 1.3.0', merged: true, baseRefName: 'develop', headRefName: 'deploy/release',
+      closingIssuesReferences: { nodes: [{
+        number: 26, title: 'Deploy naar test', repository: { nameWithOwner: 'OnroerendErfgoed/demo' },
+        labels: { nodes: [] }, issueType: { name: 'Deploy' },
+      }] },
     },
   ],
   issues: { 17: { number: 17, title: 'Kaartlaag toevoegen', labels: [], type: { name: 'Feature' } } },
@@ -85,6 +93,7 @@ test('groups issues by category in an rst changelog and bumps the version', asyn
   const comment = read(dir, 'release-comment.md');
   assert.match(comment, /🐛 Bugs/);
   assert.match(comment, /Bump dependencies \(#42\)/); // unlinked PR listed
+  assert.doesNotMatch(comment, /Deploy/); // Deploy issues left out, their PR is not unlinked
 });
 
 test('finds a nested changelog and detects underline headings in a .md file', async () => {
@@ -152,6 +161,7 @@ const subIssueGithub = (options = {}) => mockGithub({
     { number: 23, title: 'Exporteer CSV', labels: [], type: null },
     { number: 24, title: 'Crash bij login', labels: [], type: { name: 'Bug' } },
     { number: 25, title: 'Subtaak elders', labels: [], type: null },
+    { number: 27, title: 'Migratie draaien', labels: [], type: { name: 'Task' } },
   ],
   issueNodes: {
     I20: { number: 20, title: 'Nieuwe kaart', type: 'Feature' },
@@ -159,6 +169,8 @@ const subIssueGithub = (options = {}) => mockGithub({
     I22: { number: 22, title: 'Exporteer PDF', type: 'Task', parent: 'I60' },
     I23: { number: 23, title: 'Exporteer CSV', parent: 'I61' },
     I25: { number: 25, title: 'Subtaak elders', parent: 'X70' },
+    I27: { number: 27, title: 'Migratie draaien', type: 'Task', parent: 'I80' },
+    I80: { number: 80, title: 'Deploy 1.3.0', type: 'Deploy', parent: 'I60' },
     I60: { number: 60, title: 'Exports', type: 'Collection' },
     I61: { number: 61, title: 'Export deel', type: 'Task', parent: 'I60' },
     X70: { number: 70, title: 'Gedeelde login', type: 'Bug', repo: 'OnroerendErfgoed/other' },
@@ -186,6 +198,10 @@ test('lists sub-issues under their top-level parent issue', async () => {
     '- Exports (#60)',
     '  - Exporteer PDF (#22)',
     '  - Exporteer CSV (#23)',
+    '',
+    '🧹 Other',
+    '',
+    '- Migratie draaien (#27)', // its Deploy parent #80 does not group it
   ].join('\n');
   assert.equal(outputs.changelog, expected);
   assert.equal(read(dir, 'CHANGES.txt').replace(DATE, 'DATE'), `1.3.0 (DATE)\n------------------\n\n${expected}\n\n${RST_CHANGELOG}`);
@@ -215,6 +231,10 @@ test('puts blank lines around sub-issue lists in an rst changelog', async () => 
     '',
     '  - Exporteer PDF (#22)',
     '  - Exporteer CSV (#23)',
+    '',
+    '🧹 Other',
+    '',
+    '- Migratie draaien (#27)',
   ].join('\n');
   assert.equal(read(dir, 'CHANGES.rst').replace(DATE, 'DATE'), `1.3.0 (DATE)\n------------------\n\n${expected}\n\n${RST_CHANGELOG}`);
 });

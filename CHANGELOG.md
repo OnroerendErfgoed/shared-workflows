@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.2.0 (2026-11-18)
+
+- `changelog-draft.yml`: issues of type `Deploy` are administrative and left out of the changelog, whatever their labels. A PR linked only to a Deploy issue is not listed as unlinked, and sub-issues of a Deploy issue are listed without it as their parent.
+
 ## 2.1.0 (2026-11-17)
 
 - `dependency-track.yml`: `<project>-backend` and `<project>-frontend` are classified as libraries in Dependency-Track (the SBOM's `metadata.component.type`); the parent stays an application.
