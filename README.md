@@ -122,7 +122,7 @@ Runs for open pull requests from `develop` (see `source-branch`) titled `release
 3. prepends a `x.y.z (DD-MM-YYYY)` section to the changelog, grouped as below, and commits it to the PR branch;
 4. posts the list as a PR comment, with the merged PRs that have no linked issue.
 
-Each issue is listed once, in the first category it matches. Empty categories are left out.
+Each issue is listed once, in the first category it matches. Empty categories are left out. Issues of type `Deploy` are administrative and never listed; sub-issues of a `Deploy` issue are listed without it as their parent.
 
 | Category | Matches |
 | --- | --- |

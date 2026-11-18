@@ -20,6 +20,7 @@ name: Changelog draft
 #  - 🐛 Bugs: issue type Bug, or label "bug" / "fix"
 #  - ✨ Features: issue type Feature or Collection, or label "enhancement" / "feature"
 #  - 🧹 Other: everything else
+# Issues of type Deploy are administrative and left out.
 #
 # The changelog is CHANGES / CHANGELOG / HISTORY (.rst, .md or .txt), found at the shallowest
 # level in the repository (e.g. proces/CHANGES.rst), ignoring vendored and docs directories.
@@ -362,6 +363,11 @@ jobs:
               if (!linked.length && !branchIssueFound) unlinkedPrs.set(mergedPr.number, mergedPr.title);
             }
 
+            // Issues of type Deploy are administrative and stay out of the changelog. Their PRs are
+            // not reported as unlinked, and a Deploy parent does not group its sub-issues.
+            const isDeploy = (issue) => (issue.type || '').toLowerCase() === 'deploy';
+            for (const [number, issue] of issues) if (isDeploy(issue)) issues.delete(number);
+
             // c) Parent issues: sub-issues are listed under their top-level parent issue, which is
             // shown even when it is not part of this release. Without the lookup the list stays flat.
             const ISSUE_FIELDS = 'id number title repository { nameWithOwner } labels(first: 10) { nodes { name } } issueType { name }';
@@ -376,6 +382,7 @@ jobs:
             const parentById = new Map(); // node id -> parent node id, or null
             const idByNumber = new Map(); // released issue number -> node id
             const addParent = (id, parent) => {
+              if (parent && parent.issueType && parent.issueType.name.toLowerCase() === 'deploy') parent = null;
               parentById.set(id, parent ? parent.id : null);
               if (parent && !issueById.has(parent.id)) issueById.set(parent.id, toIssue(parent));
             };
